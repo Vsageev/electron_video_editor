@@ -1,0 +1,28 @@
+{
+  "name": "video-editor",
+  "version": "1.0.0",
+  "description": "A basic Electron video editor",
+  "main": "main.js",
+  "scripts": {
+    "dev": "vite",
+    "dev:electron": "VITE_DEV_SERVER_URL=http://localhost:5173 electron .",
+    "build": "vite build",
+    "start": "electron ."
+  },
+  "dependencies": {
+    "ffmpeg-static": "^5.3.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "zustand": "^5.0.0"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "electron": "^33.0.0",
+    "typescript": "^5.6.3",
+    "vite": "^6.0.0",
+    "vite-plugin-electron": "^0.28.8",
+    "vite-plugin-electron-renderer": "^0.14.6"
+  }
+}
