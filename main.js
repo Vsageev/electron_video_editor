@@ -1,7 +1,7 @@
 const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
-const { spawn, spawnSync } = require('child_process');
+const { spawnSync } = require('child_process');
 
 let mainWindow;
 
@@ -275,8 +275,8 @@ ipcMain.handle('open-file-dialog', async () => {
 
 ipcMain.handle('export-dialog', async () => {
   const result = await dialog.showSaveDialog(mainWindow, {
-    defaultPath: 'output.mp4',
-    filters: [{ name: 'Video Files', extensions: ['mp4', 'webm'] }],
+    defaultPath: 'output.webm',
+    filters: [{ name: 'WebM Video', extensions: ['webm'] }],
   });
 
   if (result.canceled) return null;
@@ -284,204 +284,21 @@ ipcMain.handle('export-dialog', async () => {
 });
 
 // ---------------------------------------------------------------------------
-// Video Export
+// Save blob from renderer to disk
 // ---------------------------------------------------------------------------
 
-let ffmpegProcess = null;
-
-function getFfmpegPath() {
-  // ffmpeg-static provides the path to the bundled binary
+ipcMain.handle('save-blob', async (_evt, { outputPath, buffer }) => {
   try {
-    return require('ffmpeg-static');
-  } catch {
-    return 'ffmpeg'; // fallback to PATH
+    await fs.promises.writeFile(outputPath, Buffer.from(buffer));
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: err.message };
   }
-}
-
-function fitSize(nw, nh, cw, ch) {
-  if (!nw || !nh || !cw || !ch) return { w: 0, h: 0 };
-  const aspect = nw / nh;
-  return aspect > cw / ch
-    ? { w: cw, h: cw / aspect }
-    : { w: ch * aspect, h: ch };
-}
-
-function getVideoResolution(filePath) {
-  const ffprobePath = getFfmpegPath().replace(/ffmpeg$/, 'ffprobe');
-  const res = spawnSync(
-    'ffprobe',
-    ['-v', 'error', '-select_streams', 'v:0',
-     '-show_entries', 'stream=width,height',
-     '-print_format', 'json', filePath],
-    {
-      encoding: 'utf8', timeout: 5000,
-      env: { ...process.env, PATH: ['/opt/homebrew/bin', '/usr/local/bin', process.env.PATH || ''].join(':') },
-    }
-  );
-  if (res.error || res.status !== 0 || !res.stdout) return null;
-  try {
-    const data = JSON.parse(res.stdout);
-    const s = data.streams?.[0];
-    if (s?.width && s?.height) return { w: s.width, h: s.height };
-  } catch {}
-  return null;
-}
-
-ipcMain.handle('export-video', async (_evt, { outputPath, clips, width, height, fps }) => {
-  if (ffmpegProcess) {
-    return { success: false, error: 'Export already in progress' };
-  }
-
-  const ffmpegPath = getFfmpegPath();
-  const videoClips = clips.filter((c) => c.type === 'video');
-
-  if (videoClips.length === 0) {
-    return { success: false, error: 'No video clips to export' };
-  }
-
-  // Calculate total timeline duration
-  const totalDuration = Math.max(...clips.map((c) => c.startTime + c.duration));
-
-  // Build ffmpeg arguments
-  const args = [];
-
-  // Base black canvas input
-  args.push('-f', 'lavfi', '-i', `color=c=black:s=${width}x${height}:d=${totalDuration}:r=${fps}`);
-
-  // Add each video clip as an input
-  for (const clip of videoClips) {
-    args.push('-i', clip.mediaPath);
-  }
-
-  // Build complex filter graph
-  const filters = [];
-  let lastLabel = '0:v';
-
-  for (let i = 0; i < videoClips.length; i++) {
-    const clip = videoClips[i];
-    const inputIdx = i + 1; // 0 is the base canvas
-
-    // Get natural resolution of this video
-    const nat = getVideoResolution(clip.mediaPath);
-    const nw = nat ? nat.w : width;
-    const nh = nat ? nat.h : height;
-
-    // Replicate preview fitSize logic: fit natural size into output resolution
-    const base = fitSize(nw, nh, width, height);
-    const scaledW = Math.round(base.w * clip.scale);
-    const scaledH = Math.round(base.h * clip.scale);
-
-    // Position: preview uses translate(-50% + x*baseW, -50% + y*baseH)
-    // In ffmpeg overlay, top-left corner position:
-    const overlayX = Math.round((width - scaledW) / 2 + clip.x * base.w);
-    const overlayY = Math.round((height - scaledH) / 2 + clip.y * base.h);
-
-    const clipDuration = clip.duration;
-    const trimStartSec = clip.trimStart;
-
-    const inLabel = `[${inputIdx}:v]`;
-    const trimmedLabel = `v${i}trimmed`;
-    const outLabel = `v${i}out`;
-
-    // Trim, reset PTS, scale
-    filters.push(
-      `${inLabel}trim=start=${trimStartSec}:duration=${clipDuration},setpts=PTS-STARTPTS,scale=${scaledW}:${scaledH}[${trimmedLabel}]`
-    );
-
-    // Overlay onto the previous result
-    const enableExpr = `between(t,${clip.startTime},${clip.startTime + clipDuration})`;
-    filters.push(
-      `[${lastLabel}][${trimmedLabel}]overlay=x=${overlayX}:y=${overlayY}:enable='${enableExpr}'[${outLabel}]`
-    );
-
-    lastLabel = outLabel;
-  }
-
-  const filterComplex = filters.join(';');
-
-  args.push('-filter_complex', filterComplex);
-  args.push('-map', `[${lastLabel}]`);
-
-  // Audio: mix all audio from video clips
-  if (videoClips.length === 1) {
-    // Single clip: just map its audio stream directly
-    args.push('-map', '1:a?');
-  } else if (videoClips.length > 1) {
-    // Multiple clips: add audio trim/delay filters and amix to the filter_complex
-    const audioFilterParts = videoClips.map((clip, i) => {
-      const inputIdx = i + 1;
-      const delayMs = Math.round(clip.startTime * 1000);
-      return `[${inputIdx}:a]atrim=start=${clip.trimStart}:duration=${clip.duration},asetpts=PTS-STARTPTS,adelay=${delayMs}|${delayMs}[a${i}]`;
-    });
-    const amixInputLabels = videoClips.map((_, i) => `[a${i}]`).join('');
-    const amixStr = `${amixInputLabels}amix=inputs=${videoClips.length}:dropout_transition=0[aout]`;
-
-    // Append audio filters to the existing filter_complex string
-    const fcIdx = args.indexOf('-filter_complex');
-    args[fcIdx + 1] = args[fcIdx + 1] + ';' + audioFilterParts.join(';') + ';' + amixStr;
-
-    args.push('-map', '[aout]');
-  }
-
-  // Output settings
-  args.push('-c:v', 'libx264', '-preset', 'medium', '-crf', '23');
-  args.push('-c:a', 'aac', '-b:a', '192k');
-  args.push('-pix_fmt', 'yuv420p');
-  args.push('-y', outputPath);
-
-  return new Promise((resolve) => {
-    ffmpegProcess = spawn(ffmpegPath, args, {
-      env: { ...process.env, PATH: ['/opt/homebrew/bin', '/usr/local/bin', process.env.PATH || ''].join(':') },
-    });
-
-    let stderrData = '';
-
-    ffmpegProcess.stderr.on('data', (data) => {
-      const text = data.toString();
-      stderrData += text;
-
-      // Parse progress: look for time=HH:MM:SS.ss
-      const timeMatch = text.match(/time=(\d+):(\d+):(\d+)\.(\d+)/);
-      if (timeMatch && totalDuration > 0) {
-        const hours = parseInt(timeMatch[1]);
-        const mins = parseInt(timeMatch[2]);
-        const secs = parseInt(timeMatch[3]);
-        const frac = parseInt(timeMatch[4]) / 100;
-        const currentSec = hours * 3600 + mins * 60 + secs + frac;
-        const percent = Math.min(100, Math.round((currentSec / totalDuration) * 100));
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('export-progress', { percent });
-        }
-      }
-    });
-
-    ffmpegProcess.on('close', (code) => {
-      ffmpegProcess = null;
-      if (code === 0) {
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('export-progress', { percent: 100 });
-        }
-        resolve({ success: true });
-      } else {
-        // Extract last few lines of stderr for error message
-        const lines = stderrData.trim().split('\n');
-        const errMsg = lines.slice(-3).join('\n');
-        resolve({ success: false, error: errMsg || `ffmpeg exited with code ${code}` });
-      }
-    });
-
-    ffmpegProcess.on('error', (err) => {
-      ffmpegProcess = null;
-      resolve({ success: false, error: err.message });
-    });
-  });
 });
 
-ipcMain.handle('cancel-export', async () => {
-  if (ffmpegProcess) {
-    ffmpegProcess.kill('SIGTERM');
-    ffmpegProcess = null;
-  }
+ipcMain.handle('read-file', async (_evt, filePath) => {
+  const buf = await fs.promises.readFile(filePath);
+  return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
 });
 
 ipcMain.handle('get-media-duration', async (_evt, filePath) => {

@@ -30,24 +30,14 @@ export interface ContextMenuItem {
   divider?: boolean;
 }
 
-export interface ExportOptions {
-  outputPath: string;
-  clips: TimelineClip[];
-  width: number;
-  height: number;
-  fps: number;
-}
-
 declare global {
   interface Window {
     api: {
       openFileDialog: () => Promise<{ path: string; name: string; ext: string }[]>;
       exportDialog: () => Promise<string | null>;
       getMediaDuration?: (filePath: string) => Promise<number>;
-      exportVideo: (options: ExportOptions) => Promise<{ success: boolean; error?: string }>;
-      cancelExport: () => Promise<void>;
-      onExportProgress: (callback: (data: { percent: number }) => void) => void;
-      removeExportProgressListener: () => void;
+      saveBlob: (outputPath: string, buffer: ArrayBuffer) => Promise<{ success: boolean; error?: string }>;
+      readFile: (filePath: string) => Promise<ArrayBuffer>;
     };
   }
 }

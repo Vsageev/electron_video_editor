@@ -1,5 +1,6 @@
-import { useEffect, useCallback } from 'react';
+import { useEffect, useCallback, useRef } from 'react';
 import { useEditorStore } from '../store/editorStore';
+import { exportToVideo } from '../utils/canvasExport';
 import MediaSidebar from './MediaSidebar';
 import PreviewPanel from './PreviewPanel';
 import Timeline from './Timeline';
@@ -12,6 +13,7 @@ export default function App() {
   const exportProgress = useEditorStore((s) => s.exportProgress);
   const setIsExporting = useEditorStore((s) => s.setIsExporting);
   const setExportProgress = useEditorStore((s) => s.setExportProgress);
+  const abortRef = useRef<AbortController | null>(null);
 
   // Delete key to remove selected clip
   useEffect(() => {
@@ -28,16 +30,6 @@ export default function App() {
     return () => document.removeEventListener('keydown', handleKeyDown);
   }, [removeClip]);
 
-  // Listen for export progress
-  useEffect(() => {
-    window.api.onExportProgress(({ percent }) => {
-      setExportProgress(percent);
-    });
-    return () => {
-      window.api.removeExportProgressListener();
-    };
-  }, [setExportProgress]);
-
   const handleExport = useCallback(async () => {
     if (timelineClips.length === 0) return;
 
@@ -47,23 +39,38 @@ export default function App() {
     setIsExporting(true);
     setExportProgress(0);
 
-    const result = await window.api.exportVideo({
-      outputPath,
-      clips: timelineClips,
-      width: 1920,
-      height: 1080,
-      fps: 30,
-    });
+    const abort = new AbortController();
+    abortRef.current = abort;
 
-    setIsExporting(false);
+    try {
+      const blob = await exportToVideo(
+        timelineClips,
+        1920,
+        1080,
+        30,
+        (percent) => setExportProgress(percent),
+        abort.signal,
+      );
 
-    if (!result.success) {
-      alert('Export failed: ' + (result.error || 'Unknown error'));
+      if (!abort.signal.aborted) {
+        const arrayBuffer = await blob.arrayBuffer();
+        const result = await window.api.saveBlob(outputPath, arrayBuffer);
+        if (!result.success) {
+          alert('Export failed: ' + (result.error || 'Unknown error'));
+        }
+      }
+    } catch (err: any) {
+      if (!abort.signal.aborted) {
+        alert('Export failed: ' + (err.message || 'Unknown error'));
+      }
+    } finally {
+      abortRef.current = null;
+      setIsExporting(false);
     }
   }, [timelineClips, setIsExporting, setExportProgress]);
 
   const handleCancelExport = useCallback(() => {
-    window.api.cancelExport();
+    abortRef.current?.abort();
     setIsExporting(false);
   }, [setIsExporting]);
 
