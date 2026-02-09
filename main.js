@@ -301,6 +301,49 @@ ipcMain.handle('read-file', async (_evt, filePath) => {
   return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
 });
 
+// ---------------------------------------------------------------------------
+// API Keys persistence (stored in .env in project folder)
+// ---------------------------------------------------------------------------
+
+const envPath = path.join(__dirname, '.env');
+
+function readApiKeys() {
+  try {
+    const content = fs.readFileSync(envPath, 'utf8');
+    const keys = {};
+    for (const line of content.split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) continue;
+      const eqIdx = trimmed.indexOf('=');
+      if (eqIdx === -1) continue;
+      const key = trimmed.slice(0, eqIdx).trim();
+      let val = trimmed.slice(eqIdx + 1).trim();
+      // Strip surrounding quotes
+      if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+        val = val.slice(1, -1);
+      }
+      if (key) keys[key] = val;
+    }
+    return keys;
+  } catch {
+    return {};
+  }
+}
+
+function writeApiKeys(keys) {
+  const lines = Object.entries(keys)
+    .filter(([k]) => k.trim())
+    .map(([k, v]) => `${k}=${v}`);
+  fs.writeFileSync(envPath, lines.join('\n') + '\n', 'utf8');
+}
+
+ipcMain.handle('get-api-keys', () => readApiKeys());
+
+ipcMain.handle('set-api-keys', (_evt, keys) => {
+  writeApiKeys(keys);
+  return { success: true };
+});
+
 ipcMain.handle('get-media-duration', async (_evt, filePath) => {
   try {
     const ext = path.extname(filePath).toLowerCase();

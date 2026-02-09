@@ -7,4 +7,6 @@ contextBridge.exposeInMainWorld('api', {
   getMediaDuration: (filePath) => ipcRenderer.invoke('get-media-duration', filePath),
   saveBlob: (outputPath, buffer) => ipcRenderer.invoke('save-blob', { outputPath, buffer }),
   readFile: (filePath) => ipcRenderer.invoke('read-file', filePath),
+  getApiKeys: () => ipcRenderer.invoke('get-api-keys'),
+  setApiKeys: (keys) => ipcRenderer.invoke('set-api-keys', keys),
 });

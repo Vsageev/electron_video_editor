@@ -5,6 +5,23 @@ import MediaSidebar from './MediaSidebar';
 import PreviewPanel from './PreviewPanel';
 import Timeline from './Timeline';
 import PropertiesSidebar from './PropertiesSidebar';
+import ApiKeysModal from './ApiKeysModal';
+
+const RESOLUTION_PRESETS = [
+  { label: '4K (3840×2160)', width: 3840, height: 2160 },
+  { label: '1080p (1920×1080)', width: 1920, height: 1080 },
+  { label: '720p (1280×720)', width: 1280, height: 720 },
+  { label: '480p (854×480)', width: 854, height: 480 },
+];
+
+const FPS_PRESETS = [24, 30, 60];
+
+const QUALITY_PRESETS = [
+  { label: 'Low (4 Mbps)', bitrate: 4_000_000 },
+  { label: 'Medium (8 Mbps)', bitrate: 8_000_000 },
+  { label: 'High (16 Mbps)', bitrate: 16_000_000 },
+  { label: 'Ultra (32 Mbps)', bitrate: 32_000_000 },
+];
 
 export default function App() {
   const { removeClip } = useEditorStore();
@@ -13,17 +30,49 @@ export default function App() {
   const exportProgress = useEditorStore((s) => s.exportProgress);
   const setIsExporting = useEditorStore((s) => s.setIsExporting);
   const setExportProgress = useEditorStore((s) => s.setExportProgress);
+  const showExportSettings = useEditorStore((s) => s.showExportSettings);
+  const setShowExportSettings = useEditorStore((s) => s.setShowExportSettings);
+  const exportSettings = useEditorStore((s) => s.exportSettings);
+  const setExportSettings = useEditorStore((s) => s.setExportSettings);
+  const setShowSettings = useEditorStore((s) => s.setShowSettings);
   const abortRef = useRef<AbortController | null>(null);
 
-  // Delete key to remove selected clip
+  // Keyboard shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if ((e.target as HTMLElement).tagName === 'INPUT') return;
+      const tag = (e.target as HTMLElement).tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+
       if (e.code === 'Delete' || e.code === 'Backspace') {
         const clipId = useEditorStore.getState().selectedClipId;
         if (clipId != null) {
           removeClip(clipId);
         }
+        return;
+      }
+
+      const state = useEditorStore.getState();
+      const fps = state.exportSettings?.fps || 30;
+      const frameTime = 1 / fps;
+
+      if (e.code === 'ArrowLeft' || e.code === 'ArrowRight') {
+        e.preventDefault();
+        const delta = e.shiftKey ? 1 : frameTime;
+        const direction = e.code === 'ArrowLeft' ? -1 : 1;
+        const newTime = Math.min(Math.max(state.currentTime + delta * direction, 0), state.duration);
+        state.setCurrentTime(newTime);
+      } else if (e.code === 'Space') {
+        e.preventDefault();
+        state.setIsPlaying(!state.isPlaying);
+      } else if (e.code === 'Home') {
+        e.preventDefault();
+        state.setCurrentTime(0);
+      } else if (e.code === 'End') {
+        e.preventDefault();
+        state.setCurrentTime(state.duration);
+      } else if (e.code === 'KeyS' && !e.metaKey && !e.ctrlKey) {
+        // Split selected clip at playhead
+        state.splitClipAtPlayhead();
       }
     };
     document.addEventListener('keydown', handleKeyDown);
@@ -33,11 +82,14 @@ export default function App() {
   const handleExport = useCallback(async () => {
     if (timelineClips.length === 0) return;
 
+    const { width, height, fps, bitrate } = useEditorStore.getState().exportSettings;
+
     const outputPath = await window.api.exportDialog();
     if (!outputPath) return;
 
     setIsExporting(true);
     setExportProgress(0);
+    setShowExportSettings(false);
 
     const abort = new AbortController();
     abortRef.current = abort;
@@ -45,11 +97,12 @@ export default function App() {
     try {
       const blob = await exportToVideo(
         timelineClips,
-        1920,
-        1080,
-        30,
+        width,
+        height,
+        fps,
         (percent) => setExportProgress(percent),
         abort.signal,
+        bitrate,
       );
 
       if (!abort.signal.aborted) {
@@ -67,12 +120,24 @@ export default function App() {
       abortRef.current = null;
       setIsExporting(false);
     }
-  }, [timelineClips, setIsExporting, setExportProgress]);
+  }, [timelineClips, setIsExporting, setExportProgress, setShowExportSettings]);
 
   const handleCancelExport = useCallback(() => {
     abortRef.current?.abort();
     setIsExporting(false);
   }, [setIsExporting]);
+
+  const handleResolutionChange = useCallback(
+    (e: React.ChangeEvent<HTMLSelectElement>) => {
+      const preset = RESOLUTION_PRESETS[Number(e.target.value)];
+      setExportSettings({ width: preset.width, height: preset.height });
+    },
+    [setExportSettings],
+  );
+
+  const selectedResIdx = RESOLUTION_PRESETS.findIndex(
+    (p) => p.width === exportSettings.width && p.height === exportSettings.height,
+  );
 
   return (
     <>
@@ -81,8 +146,17 @@ export default function App() {
         <span className="titlebar-title">Video Editor</span>
         <div className="titlebar-actions">
           <button
+            className="btn-icon titlebar-settings-btn"
+            onClick={() => setShowSettings(true)}
+            title="Settings"
+          >
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+              <path d="M6.5 1.75a.75.75 0 011.5 0v.3a5.5 5.5 0 011.68.7l.21-.22a.75.75 0 011.06 1.06l-.21.22a5.5 5.5 0 01.7 1.68h.3a.75.75 0 010 1.5h-.3a5.5 5.5 0 01-.7 1.68l.22.21a.75.75 0 01-1.06 1.06l-.22-.21a5.5 5.5 0 01-1.68.7v.3a.75.75 0 01-1.5 0v-.3a5.5 5.5 0 01-1.68-.7l-.21.22a.75.75 0 01-1.06-1.06l.21-.22a5.5 5.5 0 01-.7-1.68h-.3a.75.75 0 010-1.5h.3a5.5 5.5 0 01.7-1.68l-.22-.21A.75.75 0 014.6 2.53l.22.21a5.5 5.5 0 011.68-.7v-.3zM8 10a2 2 0 100-4 2 2 0 000 4z" fill="currentColor"/>
+            </svg>
+          </button>
+          <button
             className="btn-export"
-            onClick={handleExport}
+            onClick={() => setShowExportSettings(true)}
             disabled={timelineClips.length === 0 || isExporting}
           >
             <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
@@ -92,6 +166,62 @@ export default function App() {
           </button>
         </div>
       </div>
+
+      {showExportSettings && (
+        <div className="export-overlay" onClick={() => setShowExportSettings(false)}>
+          <div className="export-modal export-settings-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="export-modal-title">Export Settings</div>
+
+            <div className="export-settings-row">
+              <label className="export-settings-label">Resolution</label>
+              <select
+                className="export-settings-select"
+                value={selectedResIdx >= 0 ? selectedResIdx : 1}
+                onChange={handleResolutionChange}
+              >
+                {RESOLUTION_PRESETS.map((p, i) => (
+                  <option key={i} value={i}>{p.label}</option>
+                ))}
+              </select>
+            </div>
+
+            <div className="export-settings-row">
+              <label className="export-settings-label">Frame Rate</label>
+              <select
+                className="export-settings-select"
+                value={exportSettings.fps}
+                onChange={(e) => setExportSettings({ fps: Number(e.target.value) })}
+              >
+                {FPS_PRESETS.map((f) => (
+                  <option key={f} value={f}>{f} fps</option>
+                ))}
+              </select>
+            </div>
+
+            <div className="export-settings-row">
+              <label className="export-settings-label">Quality</label>
+              <select
+                className="export-settings-select"
+                value={exportSettings.bitrate}
+                onChange={(e) => setExportSettings({ bitrate: Number(e.target.value) })}
+              >
+                {QUALITY_PRESETS.map((q) => (
+                  <option key={q.bitrate} value={q.bitrate}>{q.label}</option>
+                ))}
+              </select>
+            </div>
+
+            <div className="export-settings-actions">
+              <button className="btn-export-cancel" onClick={() => setShowExportSettings(false)}>
+                Cancel
+              </button>
+              <button className="btn-export" onClick={handleExport}>
+                Export
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {isExporting && (
         <div className="export-overlay">
@@ -107,6 +237,8 @@ export default function App() {
           </div>
         </div>
       )}
+
+      <ApiKeysModal />
 
       <div className="app-layout">
         <MediaSidebar />

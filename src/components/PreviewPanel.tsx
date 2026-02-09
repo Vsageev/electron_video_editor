@@ -2,10 +2,14 @@ import { useRef, useEffect, useCallback, useState, useMemo, memo } from 'react';
 import { useEditorStore } from '../store/editorStore';
 import { formatTime } from '../utils/formatTime';
 import { filePathToFileUrl } from '../utils/fileUrl';
-import type { TimelineClip } from '../types';
+import { getAnimatedTransform, getAnimatedMask } from '../utils/keyframeEngine';
+import type { TimelineClip, AnimatableProp, ClipMask } from '../types';
 
-type HandleDir = 'nw' | 'ne' | 'sw' | 'se';
-const HANDLE_DIRS: HandleDir[] = ['nw', 'ne', 'sw', 'se'];
+type CornerDir = 'nw' | 'ne' | 'sw' | 'se';
+type EdgeDir = 'n' | 's' | 'e' | 'w';
+type HandleDir = CornerDir | EdgeDir;
+const CORNER_DIRS: CornerDir[] = ['nw', 'ne', 'sw', 'se'];
+const EDGE_DIRS: EdgeDir[] = ['n', 's', 'e', 'w'];
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -25,15 +29,49 @@ function makeTransformStyle(
   scale: number,
   bw: number,
   bh: number,
+  sX = 1,
+  sY = 1,
 ): React.CSSProperties {
   return {
     position: 'absolute',
-    width: bw * scale,
-    height: bh * scale,
+    width: bw * scale * sX,
+    height: bh * scale * sY,
     left: '50%',
     top: '50%',
     transform: `translate(calc(-50% + ${x * bw}px), calc(-50% + ${y * bh}px))`,
   };
+}
+
+function buildClipPath(mask: ClipMask): string {
+  const cx = mask.centerX * 100;
+  const cy = mask.centerY * 100;
+  const hw = (mask.width / 2) * 100;
+  const hh = (mask.height / 2) * 100;
+
+  if (mask.shape === 'ellipse') {
+    const inner = `ellipse(${hw}% ${hh}% at ${cx}% ${cy}%)`;
+    if (!mask.invert) return inner;
+    // Invert: polygon covering full area with hole via evenodd
+    return `polygon(evenodd, 0% 0%, 100% 0%, 100% 100%, 0% 100%, 0% 0%, ${cx - hw}% ${cy}%, ${cx}% ${cy - hh}%, ${cx + hw}% ${cy}%, ${cx}% ${cy + hh}%, ${cx - hw}% ${cy}%)`;
+  }
+
+  // rectangle
+  const top = cy - hh;
+  const right = 100 - (cx + hw);
+  const bottom = 100 - (cy + hh);
+  const left = cx - hw;
+  const r = mask.borderRadius * Math.min(hw, hh) * 2;
+  const rStr = r > 0 ? ` round ${r}%` : '';
+
+  if (!mask.invert) {
+    return `inset(${top}% ${right}% ${bottom}% ${left}%${rStr})`;
+  }
+  // Invert via polygon with evenodd
+  const l = left;
+  const t = top;
+  const rr = 100 - right;
+  const bb = 100 - bottom;
+  return `polygon(evenodd, 0% 0%, 100% 0%, 100% 100%, 0% 100%, 0% 0%, ${l}% ${t}%, ${rr}% ${t}%, ${rr}% ${bb}%, ${l}% ${bb}%, ${l}% ${t}%)`;
 }
 
 // ---------------------------------------------------------------------------
@@ -47,6 +85,7 @@ const VideoLayer = memo(function VideoLayer({
   containerW,
   containerH,
   onNaturalSize,
+  onSelect,
 }: {
   clip: TimelineClip;
   globalTime: number;
@@ -54,6 +93,7 @@ const VideoLayer = memo(function VideoLayer({
   containerW: number;
   containerH: number;
   onNaturalSize: (id: number, w: number, h: number) => void;
+  onSelect: (id: number) => void;
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [natural, setNatural] = useState({ w: 0, h: 0 });
@@ -93,10 +133,24 @@ const VideoLayer = memo(function VideoLayer({
   }, [localTime, isPlaying]);
 
   const base = fitSize(natural.w, natural.h, containerW, containerH);
+  const clipLocalTime = globalTime - clip.startTime;
+  const { x, y, scale, scaleX, scaleY } = getAnimatedTransform(clip, clipLocalTime);
+  const animMask = getAnimatedMask(clip, clipLocalTime);
+
   const style: React.CSSProperties =
     base.w > 0
-      ? { ...makeTransformStyle(clip.x, clip.y, clip.scale, base.w, base.h), pointerEvents: 'none' }
+      ? {
+          ...makeTransformStyle(x, y, scale, base.w, base.h, scaleX, scaleY),
+          cursor: 'pointer',
+          ...(animMask ? { clipPath: buildClipPath(animMask) } : {}),
+          ...(animMask && animMask.feather > 0 ? { filter: `blur(${animMask.feather}px)` } : {}),
+        }
       : { position: 'absolute', opacity: 0, pointerEvents: 'none' };
+
+  const handleClick = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation();
+    onSelect(clip.id);
+  }, [clip.id, onSelect]);
 
   return (
     <video
@@ -105,6 +159,7 @@ const VideoLayer = memo(function VideoLayer({
       style={style}
       preload="auto"
       onLoadedMetadata={handleMetadata}
+      onMouseDown={handleClick}
       playsInline
     />
   );
@@ -135,6 +190,8 @@ export default function PreviewPanel() {
   const previewMediaPath = useEditorStore((s) => s.previewMediaPath);
   const previewMediaType = useEditorStore((s) => s.previewMediaType);
   const updateClip = useEditorStore((s) => s.updateClip);
+  const addKeyframe = useEditorStore((s) => s.addKeyframe);
+  const updateKeyframe = useEditorStore((s) => s.updateKeyframe);
   const setCurrentTime = useEditorStore((s) => s.setCurrentTime);
   const setIsPlaying = useEditorStore((s) => s.setIsPlaying);
   const setDuration = useEditorStore((s) => s.setDuration);
@@ -150,23 +207,46 @@ export default function PreviewPanel() {
     return () => ro.disconnect();
   }, []);
 
+  const selectClip = useEditorStore((s) => s.selectClip);
+
   // Natural-size callback from VideoLayers
   const handleNaturalSize = useCallback((id: number, w: number, h: number) => {
     setNaturalSizes((prev) => ({ ...prev, [id]: { w, h } }));
   }, []);
 
+  // Select clip by clicking on it in preview
+  const handleSelectClip = useCallback((id: number) => {
+    selectClip(id);
+  }, [selectClip]);
+
+  // Deselect when clicking empty preview area
+  const handleWrapperClick = useCallback((e: React.MouseEvent) => {
+    if (e.target === e.currentTarget) {
+      selectClip(null);
+    }
+  }, [selectClip]);
+
   // ---- Derived state ----
   const hasTimelineClips = timelineClips.length > 0;
 
+  const tracks = useEditorStore((s) => s.tracks);
+
   const visibleVideoClips = useMemo(
     () =>
-      timelineClips.filter(
-        (c) =>
-          c.type === 'video' &&
-          currentTime >= c.startTime &&
-          currentTime < c.startTime + c.duration,
-      ),
-    [timelineClips, currentTime],
+      timelineClips
+        .filter(
+          (c) =>
+            c.type === 'video' &&
+            currentTime >= c.startTime &&
+            currentTime < c.startTime + c.duration,
+        )
+        // Higher track (earlier in tracks array = top of timeline) renders last = on top
+        .sort((a, b) => {
+          const ai = tracks.indexOf(a.track);
+          const bi = tracks.indexOf(b.track);
+          return bi - ai;
+        }),
+    [timelineClips, currentTime, tracks],
   );
 
   const timelineDuration = useMemo(() => {
@@ -256,6 +336,22 @@ export default function PreviewPanel() {
     return fitSize(nat.w, nat.h, wrapperSize.w, wrapperSize.h);
   }, [selectedClip, naturalSizes, wrapperSize]);
 
+  const setTransformProp = useCallback(
+    (id: number, prop: AnimatableProp, value: number, localTime: number) => {
+      const freshClip = useEditorStore.getState().timelineClips.find((c) => c.id === id);
+      if (!freshClip) return;
+      const kfs = freshClip.keyframes?.[prop];
+      if (kfs && kfs.length > 0) {
+        const existing = kfs.find((k) => Math.abs(k.time - localTime) < 0.02);
+        if (existing) updateKeyframe(id, prop, existing.id, { value });
+        else addKeyframe(id, prop, localTime, value, 'linear');
+      } else {
+        updateClip(id, { [prop]: value });
+      }
+    },
+    [updateClip, addKeyframe, updateKeyframe],
+  );
+
   const handleMoveDown = useCallback(
     (e: React.MouseEvent) => {
       if (!selectedClip || selectedClip.type !== 'video') return;
@@ -265,17 +361,17 @@ export default function PreviewPanel() {
 
       const startX = e.clientX;
       const startY = e.clientY;
-      const origX = selectedClip.x;
-      const origY = selectedClip.y;
+      const clipLocalTime = currentTime - selectedClip.startTime;
+      const anim = getAnimatedTransform(selectedClip, clipLocalTime);
+      const origX = anim.x;
+      const origY = anim.y;
       const base = getSelectedBase();
       if (!base.w) return;
       const id = selectedClip.id;
 
       const onMove = (ev: MouseEvent) => {
-        updateClip(id, {
-          x: origX + (ev.clientX - startX) / base.w,
-          y: origY + (ev.clientY - startY) / base.h,
-        });
+        setTransformProp(id, 'x', origX + (ev.clientX - startX) / base.w, clipLocalTime);
+        setTransformProp(id, 'y', origY + (ev.clientY - startY) / base.h, clipLocalTime);
       };
       const onUp = () => {
         document.removeEventListener('mousemove', onMove);
@@ -284,21 +380,23 @@ export default function PreviewPanel() {
       document.addEventListener('mousemove', onMove);
       document.addEventListener('mouseup', onUp);
     },
-    [selectedClip, getSelectedBase, updateClip],
+    [selectedClip, currentTime, getSelectedBase, setTransformProp],
   );
 
-  // ---- Transform: resize ----
-  const handleResizeDown = useCallback(
-    (e: React.MouseEvent, dir: HandleDir) => {
+  // ---- Transform: corner resize (uniform scale) ----
+  const handleCornerResizeDown = useCallback(
+    (e: React.MouseEvent, dir: CornerDir) => {
       if (!selectedClip || selectedClip.type !== 'video') return;
       e.preventDefault();
       e.stopPropagation();
 
       const startX = e.clientX;
       const startY = e.clientY;
-      const origScale = selectedClip.scale;
-      const origXPos = selectedClip.x;
-      const origYPos = selectedClip.y;
+      const clipLocalTime = currentTime - selectedClip.startTime;
+      const anim = getAnimatedTransform(selectedClip, clipLocalTime);
+      const origScale = anim.scale;
+      const origXPos = anim.x;
+      const origYPos = anim.y;
       const base = getSelectedBase();
       if (!base.w) return;
       const id = selectedClip.id;
@@ -311,11 +409,9 @@ export default function PreviewPanel() {
         const delta = (dx * signX + dy * signY) / 2;
         const newScale = Math.max(0.1, origScale + delta / (base.w * 0.5));
         const dScale = newScale - origScale;
-        updateClip(id, {
-          scale: newScale,
-          x: origXPos + (dir === 'nw' || dir === 'sw' ? dScale * 0.5 : -dScale * 0.5),
-          y: origYPos + (dir === 'nw' || dir === 'ne' ? dScale * 0.5 : -dScale * 0.5),
-        });
+        setTransformProp(id, 'scale', newScale, clipLocalTime);
+        setTransformProp(id, 'x', origXPos + (dir === 'nw' || dir === 'sw' ? dScale * 0.5 : -dScale * 0.5), clipLocalTime);
+        setTransformProp(id, 'y', origYPos + (dir === 'nw' || dir === 'ne' ? dScale * 0.5 : -dScale * 0.5), clipLocalTime);
       };
       const onUp = () => {
         document.removeEventListener('mousemove', onMove);
@@ -324,7 +420,217 @@ export default function PreviewPanel() {
       document.addEventListener('mousemove', onMove);
       document.addEventListener('mouseup', onUp);
     },
-    [selectedClip, getSelectedBase, updateClip],
+    [selectedClip, currentTime, getSelectedBase, setTransformProp],
+  );
+
+  // ---- Transform: edge resize (non-uniform scaleX / scaleY) ----
+  const handleEdgeResizeDown = useCallback(
+    (e: React.MouseEvent, dir: EdgeDir) => {
+      if (!selectedClip || selectedClip.type !== 'video') return;
+      e.preventDefault();
+      e.stopPropagation();
+
+      const startX = e.clientX;
+      const startY = e.clientY;
+      const clipLocalTime = currentTime - selectedClip.startTime;
+      const anim = getAnimatedTransform(selectedClip, clipLocalTime);
+      const origScaleX = anim.scaleX;
+      const origScaleY = anim.scaleY;
+      const origXPos = anim.x;
+      const origYPos = anim.y;
+      const base = getSelectedBase();
+      if (!base.w) return;
+      const id = selectedClip.id;
+      const effectiveW = base.w * anim.scale;
+      const effectiveH = base.h * anim.scale;
+
+      const onMove = (ev: MouseEvent) => {
+        const dx = ev.clientX - startX;
+        const dy = ev.clientY - startY;
+
+        if (dir === 'e' || dir === 'w') {
+          const sign = dir === 'w' ? -1 : 1;
+          const newSX = Math.max(0.1, origScaleX + (dx * sign) / (effectiveW * 0.5));
+          const dSX = newSX - origScaleX;
+          setTransformProp(id, 'scaleX', newSX, clipLocalTime);
+          setTransformProp(id, 'x', origXPos + (dir === 'w' ? dSX * anim.scale * 0.5 : -dSX * anim.scale * 0.5), clipLocalTime);
+        } else {
+          const sign = dir === 'n' ? -1 : 1;
+          const newSY = Math.max(0.1, origScaleY + (dy * sign) / (effectiveH * 0.5));
+          const dSY = newSY - origScaleY;
+          setTransformProp(id, 'scaleY', newSY, clipLocalTime);
+          setTransformProp(id, 'y', origYPos + (dir === 'n' ? dSY * anim.scale * 0.5 : -dSY * anim.scale * 0.5), clipLocalTime);
+        }
+      };
+      const onUp = () => {
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+      };
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    },
+    [selectedClip, currentTime, getSelectedBase, setTransformProp],
+  );
+
+  // ---- Mask: set property (keyframe-aware, writes to clip.mask) ----
+  const setMaskProp = useCallback(
+    (id: number, prop: AnimatableProp, maskKey: string, value: number, localTime: number) => {
+      const freshClip = useEditorStore.getState().timelineClips.find((c) => c.id === id);
+      if (!freshClip?.mask) return;
+      const kfs = freshClip.keyframes?.[prop];
+      if (kfs && kfs.length > 0) {
+        const existing = kfs.find((k) => Math.abs(k.time - localTime) < 0.02);
+        if (existing) updateKeyframe(id, prop, existing.id, { value });
+        else addKeyframe(id, prop, localTime, value, 'linear');
+      } else {
+        updateClip(id, { mask: { ...freshClip.mask, [maskKey]: value } });
+      }
+    },
+    [updateClip, addKeyframe, updateKeyframe],
+  );
+
+  // ---- Mask: move (drag mask center) ----
+  const handleMaskMoveDown = useCallback(
+    (e: React.MouseEvent) => {
+      if (!selectedClip?.mask || selectedClip.type !== 'video') return;
+      if ((e.target as HTMLElement).dataset.maskhandle) return;
+      e.preventDefault();
+      e.stopPropagation();
+
+      const startX = e.clientX;
+      const startY = e.clientY;
+      const clipLocalTime = currentTime - selectedClip.startTime;
+      const mask = getAnimatedMask(selectedClip, clipLocalTime);
+      if (!mask) return;
+      const origCX = mask.centerX;
+      const origCY = mask.centerY;
+      const id = selectedClip.id;
+
+      // The transform box pixel size = base * scale * scaleX/Y
+      const base = getSelectedBase();
+      if (!base.w) return;
+      const anim = getAnimatedTransform(selectedClip, clipLocalTime);
+      const boxW = base.w * anim.scale * anim.scaleX;
+      const boxH = base.h * anim.scale * anim.scaleY;
+
+      const onMove = (ev: MouseEvent) => {
+        const dx = (ev.clientX - startX) / boxW;
+        const dy = (ev.clientY - startY) / boxH;
+        setMaskProp(id, 'maskCenterX', 'centerX', origCX + dx, clipLocalTime);
+        setMaskProp(id, 'maskCenterY', 'centerY', origCY + dy, clipLocalTime);
+      };
+      const onUp = () => {
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+      };
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    },
+    [selectedClip, currentTime, getSelectedBase, setMaskProp],
+  );
+
+  // ---- Mask: edge resize ----
+  const handleMaskEdgeDown = useCallback(
+    (e: React.MouseEvent, dir: EdgeDir) => {
+      if (!selectedClip?.mask || selectedClip.type !== 'video') return;
+      e.preventDefault();
+      e.stopPropagation();
+
+      const startX = e.clientX;
+      const startY = e.clientY;
+      const clipLocalTime = currentTime - selectedClip.startTime;
+      const mask = getAnimatedMask(selectedClip, clipLocalTime);
+      if (!mask) return;
+      const origW = mask.width;
+      const origH = mask.height;
+      const origCX = mask.centerX;
+      const origCY = mask.centerY;
+      const id = selectedClip.id;
+
+      const base = getSelectedBase();
+      if (!base.w) return;
+      const anim = getAnimatedTransform(selectedClip, clipLocalTime);
+      const boxW = base.w * anim.scale * anim.scaleX;
+      const boxH = base.h * anim.scale * anim.scaleY;
+
+      const onMove = (ev: MouseEvent) => {
+        const dx = (ev.clientX - startX) / boxW;
+        const dy = (ev.clientY - startY) / boxH;
+
+        if (dir === 'e') {
+          const newW = Math.max(0.01, origW + dx);
+          setMaskProp(id, 'maskWidth', 'width', newW, clipLocalTime);
+          setMaskProp(id, 'maskCenterX', 'centerX', origCX + dx / 2, clipLocalTime);
+        } else if (dir === 'w') {
+          const newW = Math.max(0.01, origW - dx);
+          setMaskProp(id, 'maskWidth', 'width', newW, clipLocalTime);
+          setMaskProp(id, 'maskCenterX', 'centerX', origCX + dx / 2, clipLocalTime);
+        } else if (dir === 's') {
+          const newH = Math.max(0.01, origH + dy);
+          setMaskProp(id, 'maskHeight', 'height', newH, clipLocalTime);
+          setMaskProp(id, 'maskCenterY', 'centerY', origCY + dy / 2, clipLocalTime);
+        } else {
+          // n
+          const newH = Math.max(0.01, origH - dy);
+          setMaskProp(id, 'maskHeight', 'height', newH, clipLocalTime);
+          setMaskProp(id, 'maskCenterY', 'centerY', origCY + dy / 2, clipLocalTime);
+        }
+      };
+      const onUp = () => {
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+      };
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    },
+    [selectedClip, currentTime, getSelectedBase, setMaskProp],
+  );
+
+  // ---- Mask: corner resize (both width + height) ----
+  const handleMaskCornerDown = useCallback(
+    (e: React.MouseEvent, dir: CornerDir) => {
+      if (!selectedClip?.mask || selectedClip.type !== 'video') return;
+      e.preventDefault();
+      e.stopPropagation();
+
+      const startX = e.clientX;
+      const startY = e.clientY;
+      const clipLocalTime = currentTime - selectedClip.startTime;
+      const mask = getAnimatedMask(selectedClip, clipLocalTime);
+      if (!mask) return;
+      const origW = mask.width;
+      const origH = mask.height;
+      const origCX = mask.centerX;
+      const origCY = mask.centerY;
+      const id = selectedClip.id;
+
+      const base = getSelectedBase();
+      if (!base.w) return;
+      const anim = getAnimatedTransform(selectedClip, clipLocalTime);
+      const boxW = base.w * anim.scale * anim.scaleX;
+      const boxH = base.h * anim.scale * anim.scaleY;
+
+      const onMove = (ev: MouseEvent) => {
+        const dx = (ev.clientX - startX) / boxW;
+        const dy = (ev.clientY - startY) / boxH;
+        const signX = dir === 'nw' || dir === 'sw' ? -1 : 1;
+        const signY = dir === 'nw' || dir === 'ne' ? -1 : 1;
+
+        const newW = Math.max(0.01, origW + dx * signX);
+        const newH = Math.max(0.01, origH + dy * signY);
+        setMaskProp(id, 'maskWidth', 'width', newW, clipLocalTime);
+        setMaskProp(id, 'maskHeight', 'height', newH, clipLocalTime);
+        setMaskProp(id, 'maskCenterX', 'centerX', origCX + dx / 2, clipLocalTime);
+        setMaskProp(id, 'maskCenterY', 'centerY', origCY + dy / 2, clipLocalTime);
+      };
+      const onUp = () => {
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+      };
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    },
+    [selectedClip, currentTime, getSelectedBase, setMaskProp],
   );
 
   // ---- Transport ----
@@ -371,23 +677,29 @@ export default function PreviewPanel() {
     visibleVideoClips.some((c) => c.id === selectedClip.id);
 
   let handleStyle: React.CSSProperties | undefined;
+  let selectedMask: ClipMask | null = null;
   if (showHandles && selectedClip) {
     const base = getSelectedBase();
     if (base.w > 0) {
+      const clipLocalTime = currentTime - selectedClip.startTime;
+      const anim = getAnimatedTransform(selectedClip, clipLocalTime);
       handleStyle = makeTransformStyle(
-        selectedClip.x,
-        selectedClip.y,
-        selectedClip.scale,
+        anim.x,
+        anim.y,
+        anim.scale,
         base.w,
         base.h,
+        anim.scaleX,
+        anim.scaleY,
       );
+      selectedMask = getAnimatedMask(selectedClip, clipLocalTime);
     }
   }
 
   // ---- Render ----
   return (
     <div className="preview-container">
-      <div className="preview-wrapper" ref={wrapperRef}>
+      <div className="preview-wrapper" ref={wrapperRef} onMouseDown={handleWrapperClick}>
         {/* Timeline composite: one VideoLayer per visible video clip */}
         {hasTimelineClips &&
           visibleVideoClips.map((clip) => (
@@ -399,6 +711,7 @@ export default function PreviewPanel() {
               containerW={wrapperSize.w}
               containerH={wrapperSize.h}
               onNaturalSize={handleNaturalSize}
+              onSelect={handleSelectClip}
             />
           ))}
 
@@ -420,14 +733,54 @@ export default function PreviewPanel() {
             style={handleStyle}
             onMouseDown={handleMoveDown}
           >
-            {HANDLE_DIRS.map((dir) => (
+            {CORNER_DIRS.map((dir) => (
               <div
                 key={dir}
                 className={`canvas-handle canvas-handle-${dir}`}
                 data-handle="1"
-                onMouseDown={(e) => handleResizeDown(e, dir)}
+                onMouseDown={(e) => handleCornerResizeDown(e, dir)}
               />
             ))}
+            {EDGE_DIRS.map((dir) => (
+              <div
+                key={dir}
+                className={`canvas-edge-handle canvas-edge-handle-${dir}`}
+                data-handle="1"
+                onMouseDown={(e) => handleEdgeResizeDown(e, dir)}
+              />
+            ))}
+            {selectedMask && (
+              <div
+                className="mask-interact-box"
+                style={{
+                  left: `${(selectedMask.centerX - selectedMask.width / 2) * 100}%`,
+                  top: `${(selectedMask.centerY - selectedMask.height / 2) * 100}%`,
+                  width: `${selectedMask.width * 100}%`,
+                  height: `${selectedMask.height * 100}%`,
+                  borderRadius: selectedMask.shape === 'ellipse' ? '50%' : `${selectedMask.borderRadius * Math.min(selectedMask.width, selectedMask.height) * 100}%`,
+                }}
+                onMouseDown={handleMaskMoveDown}
+              >
+                {/* Mask corner handles */}
+                {CORNER_DIRS.map((dir) => (
+                  <div
+                    key={dir}
+                    className={`mask-handle mask-handle-${dir}`}
+                    data-maskhandle="1"
+                    onMouseDown={(e) => handleMaskCornerDown(e, dir)}
+                  />
+                ))}
+                {/* Mask edge handles */}
+                {EDGE_DIRS.map((dir) => (
+                  <div
+                    key={dir}
+                    className={`mask-edge-handle mask-edge-handle-${dir}`}
+                    data-maskhandle="1"
+                    onMouseDown={(e) => handleMaskEdgeDown(e, dir)}
+                  />
+                ))}
+              </div>
+            )}
           </div>
         )}
 

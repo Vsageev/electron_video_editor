@@ -1,5 +1,6 @@
 import { Muxer, ArrayBufferTarget } from 'webm-muxer';
 import type { TimelineClip } from '../types';
+import { getAnimatedTransform, getAnimatedMask } from './keyframeEngine';
 
 function fitSize(nw: number, nh: number, cw: number, ch: number) {
   if (!nw || !nh || !cw || !ch) return { w: 0, h: 0 };
@@ -43,6 +44,7 @@ export async function exportToVideo(
   fps: number,
   onProgress: (percent: number) => void,
   abortSignal: AbortSignal,
+  bitrate: number = 8_000_000,
 ): Promise<Blob> {
   const videoClips = clips.filter((c) => c.type === 'video');
   if (videoClips.length === 0) {
@@ -102,7 +104,7 @@ export async function exportToVideo(
     codec: 'vp09.00.10.08',
     width,
     height,
-    bitrate: 8_000_000,
+    bitrate,
     framerate: fps,
   });
 
@@ -129,12 +131,49 @@ export async function exportToVideo(
         const nw = video.videoWidth;
         const nh = video.videoHeight;
         const base = fitSize(nw, nh, width, height);
-        const scaledW = base.w * clip.scale;
-        const scaledH = base.h * clip.scale;
-        const drawX = (width - scaledW) / 2 + clip.x * base.w;
-        const drawY = (height - scaledH) / 2 + clip.y * base.h;
+        const animTime = timelineTime - clip.startTime;
+        const { x, y, scale, scaleX, scaleY } = getAnimatedTransform(clip, animTime);
+        const scaledW = base.w * scale * scaleX;
+        const scaledH = base.h * scale * scaleY;
+        const drawX = (width - scaledW) / 2 + x * base.w;
+        const drawY = (height - scaledH) / 2 + y * base.h;
+
+        const mask = getAnimatedMask(clip, animTime);
+        if (mask) {
+          ctx.save();
+          const mcx = drawX + mask.centerX * scaledW;
+          const mcy = drawY + mask.centerY * scaledH;
+          const mw = (mask.width / 2) * scaledW;
+          const mh = (mask.height / 2) * scaledH;
+          ctx.beginPath();
+          if (mask.shape === 'ellipse') {
+            ctx.ellipse(mcx, mcy, mw, mh, 0, 0, Math.PI * 2);
+          } else {
+            const rx = mask.borderRadius * Math.min(mw, mh) * 2;
+            if (rx > 0) {
+              const lx = mcx - mw, ly = mcy - mh, rw = mw * 2, rh = mh * 2;
+              ctx.moveTo(lx + rx, ly);
+              ctx.lineTo(lx + rw - rx, ly);
+              ctx.arcTo(lx + rw, ly, lx + rw, ly + rx, rx);
+              ctx.lineTo(lx + rw, ly + rh - rx);
+              ctx.arcTo(lx + rw, ly + rh, lx + rw - rx, ly + rh, rx);
+              ctx.lineTo(lx + rx, ly + rh);
+              ctx.arcTo(lx, ly + rh, lx, ly + rh - rx, rx);
+              ctx.lineTo(lx, ly + rx);
+              ctx.arcTo(lx, ly, lx + rx, ly, rx);
+              ctx.closePath();
+            } else {
+              ctx.rect(mcx - mw, mcy - mh, mw * 2, mh * 2);
+            }
+          }
+          ctx.clip();
+        }
 
         ctx.drawImage(video, drawX, drawY, scaledW, scaledH);
+
+        if (mask) {
+          ctx.restore();
+        }
       }
     }
 

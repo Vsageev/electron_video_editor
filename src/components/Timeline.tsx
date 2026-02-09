@@ -4,7 +4,7 @@ import { formatTimeShort } from '../utils/formatTime';
 import TimelineClipComponent from './TimelineClip';
 
 export default function Timeline() {
-  const { timelineClips, selectedClipId, currentTime, zoom, setZoom, selectClip, addClipAtTime, mediaFiles, tracks, addTrack, removeTrack } =
+  const { timelineClips, selectedClipId, currentTime, zoom, setZoom, selectClip, addClipAtTime, mediaFiles, tracks, addTrack, removeTrack, splitClipAtPlayhead, rippleEnabled, toggleRipple } =
     useEditorStore();
   const containerRef = useRef<HTMLDivElement>(null);
   const isDraggingRef = useRef(false);
@@ -190,6 +190,15 @@ export default function Timeline() {
       <div className="timeline-toolbar">
         <div className="timeline-toolbar-left">
           <span className="sidebar-label">TIMELINE</span>
+          <button
+            className={`btn-icon btn-sm${rippleEnabled ? ' btn-ripple-active' : ''}`}
+            onClick={toggleRipple}
+            title="Ripple edit (auto-close gaps)"
+          >
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+              <path d="M2 7h3l1.5-3 3 6L11 7h1" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </button>
         </div>
         <div className="timeline-toolbar-right">
           <button
@@ -199,6 +208,17 @@ export default function Timeline() {
           >
             <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
               <path d="M7 3v8M3 7h8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+            </svg>
+          </button>
+          <button
+            className="btn-icon btn-sm"
+            onClick={splitClipAtPlayhead}
+            title="Split clip at playhead (S)"
+          >
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+              <path d="M7 1v12" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+              <path d="M3 4L7 7 3 10" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+              <path d="M11 4L7 7 11 10" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
             </svg>
           </button>
           <div style={{ width: 1, height: 16, background: 'var(--border-subtle)', margin: '0 4px' }} />
