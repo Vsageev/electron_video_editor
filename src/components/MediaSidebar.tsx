@@ -1,8 +1,43 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { useEditorStore } from '../store/editorStore';
 import { isVideoExt, getMediaDuration, formatTime } from '../utils/formatTime';
 import ContextMenu from './ContextMenu';
 import type { MediaFile, ContextMenuItem } from '../types';
+
+const METADATA_HINTS: Record<string, string> = {
+  video: `# Scene Description
+
+## Shot Details
+- **Location**:
+- **Camera**:
+- **Resolution**:
+
+## Timestamps
+- 00:00 – 00:05  Establishing shot
+- 00:05 – 00:12  Subject enters frame
+
+## Notes
+Add any production notes, scene context, or editing instructions here.
+
+## Tags
+#raw #footage`,
+  audio: `# Audio Notes
+
+## Track Info
+- **Artist / Source**:
+- **BPM**:
+- **Key**:
+
+## Timestamps
+- 00:00 – 00:30  Intro / build-up
+- 00:30 – 01:15  Main section
+
+## Usage Notes
+Describe where this audio fits in the project.
+
+## Tags
+#music #sfx`,
+};
 
 export default function MediaSidebar() {
   const {
@@ -13,6 +48,10 @@ export default function MediaSidebar() {
     selectMedia,
     addClip,
     setPreviewMedia,
+    mediaMetadata,
+    mediaMetadataLoading,
+    loadMediaMetadata,
+    saveMediaMetadata,
   } = useEditorStore();
 
   const [contextMenu, setContextMenu] = useState<{
@@ -20,6 +59,42 @@ export default function MediaSidebar() {
     y: number;
     items: ContextMenuItem[];
   } | null>(null);
+
+  const [metadataOpen, setMetadataOpen] = useState(false);
+  const [editingMetadata, setEditingMetadata] = useState(false);
+  const [draftMetadata, setDraftMetadata] = useState('');
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  const currentProject = useEditorStore((s) => s.currentProject);
+  const projectDir = useEditorStore((s) => s.projectDir);
+
+  const selectedMedia = selectedMediaIndex !== null ? mediaFiles[selectedMediaIndex] : null;
+  const metadataContent = selectedMedia ? (mediaMetadata[selectedMedia.path] ?? '') : '';
+
+  // Load metadata when selection changes
+  useEffect(() => {
+    if (selectedMedia) {
+      loadMediaMetadata(selectedMedia.path);
+    }
+    setEditingMetadata(false);
+  }, [selectedMedia?.path, loadMediaMetadata]);
+
+  const handleStartEdit = useCallback(() => {
+    setDraftMetadata(metadataContent);
+    setEditingMetadata(true);
+    setTimeout(() => textareaRef.current?.focus(), 0);
+  }, [metadataContent]);
+
+  const handleSaveMetadata = useCallback(() => {
+    if (selectedMedia) {
+      saveMediaMetadata(selectedMedia.path, draftMetadata);
+    }
+    setEditingMetadata(false);
+  }, [selectedMedia, draftMetadata, saveMediaMetadata]);
+
+  const handleCancelEdit = useCallback(() => {
+    setEditingMetadata(false);
+  }, []);
 
   const handleImport = useCallback(async () => {
     const files = await window.api.openFileDialog();
@@ -29,16 +104,29 @@ export default function MediaSidebar() {
     for (const file of files) {
       const type = isVideoExt(file.ext) ? 'video' : 'audio';
       const duration = await getMediaDuration(file.path, type);
+
+      let finalPath = file.path;
+      let finalName = file.name;
+
+      // Copy media into project folder if a project is active
+      if (currentProject) {
+        const copyResult = await window.api.copyMediaToProject(currentProject, file.path);
+        if (copyResult.success && copyResult.relativePath) {
+          finalPath = projectDir + '/' + copyResult.relativePath;
+          finalName = copyResult.relativePath.split('/').pop() || file.name;
+        }
+      }
+
       newMediaFiles.push({
-        path: file.path,
-        name: file.name,
+        path: finalPath,
+        name: finalName,
         ext: file.ext,
         type: type as 'video' | 'audio',
         duration,
       });
     }
     addMediaFiles(newMediaFiles);
-  }, [addMediaFiles]);
+  }, [addMediaFiles, currentProject, projectDir]);
 
   const handleClick = useCallback(
     (index: number) => {
@@ -133,6 +221,68 @@ export default function MediaSidebar() {
           ))
         )}
       </div>
+      {/* Metadata Panel */}
+      {selectedMedia && (
+        <div className="media-metadata-section">
+          <button
+            className="media-metadata-toggle"
+            onClick={() => setMetadataOpen((v) => !v)}
+          >
+            <svg
+              width="10"
+              height="10"
+              viewBox="0 0 10 10"
+              fill="none"
+              className={`media-metadata-chevron${metadataOpen ? ' open' : ''}`}
+            >
+              <path d="M3 1.5L6.5 5L3 8.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+            <span className="media-metadata-label">
+              METADATA
+              <span className="media-metadata-filename">{selectedMedia.name}</span>
+            </span>
+            {metadataContent && (
+              <span className="media-metadata-dot" />
+            )}
+          </button>
+          {metadataOpen && (
+            <div className="media-metadata-body">
+              {mediaMetadataLoading ? (
+                <div className="media-metadata-loading">Loading...</div>
+              ) : editingMetadata ? (
+                <>
+                  <textarea
+                    ref={textareaRef}
+                    className="media-metadata-textarea"
+                    value={draftMetadata}
+                    onChange={(e) => setDraftMetadata(e.target.value)}
+                    placeholder={METADATA_HINTS[selectedMedia.type] || ''}
+                    spellCheck={false}
+                  />
+                  <div className="media-metadata-actions">
+                    <button className="media-metadata-btn save" onClick={handleSaveMetadata}>
+                      Save
+                    </button>
+                    <button className="media-metadata-btn cancel" onClick={handleCancelEdit}>
+                      Cancel
+                    </button>
+                  </div>
+                </>
+              ) : metadataContent ? (
+                <div className="media-metadata-preview" onClick={handleStartEdit}>
+                  <pre className="media-metadata-content">{metadataContent}</pre>
+                  <span className="media-metadata-edit-hint">Click to edit</span>
+                </div>
+              ) : (
+                <div className="media-metadata-empty" onClick={handleStartEdit}>
+                  <pre className="media-metadata-hint">{METADATA_HINTS[selectedMedia.type] || ''}</pre>
+                  <span className="media-metadata-edit-hint">Click to add metadata</span>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
       {contextMenu && (
         <ContextMenu
           x={contextMenu.x}

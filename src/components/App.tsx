@@ -1,4 +1,4 @@
-import { useEffect, useCallback, useRef } from 'react';
+import { useEffect, useCallback, useRef, useState } from 'react';
 import { useEditorStore } from '../store/editorStore';
 import { exportToVideo } from '../utils/canvasExport';
 import MediaSidebar from './MediaSidebar';
@@ -6,6 +6,7 @@ import PreviewPanel from './PreviewPanel';
 import Timeline from './Timeline';
 import PropertiesSidebar from './PropertiesSidebar';
 import ApiKeysModal from './ApiKeysModal';
+import ProjectPicker from './ProjectPicker';
 
 const RESOLUTION_PRESETS = [
   { label: '4K (3840×2160)', width: 3840, height: 2160 },
@@ -35,13 +36,49 @@ export default function App() {
   const exportSettings = useEditorStore((s) => s.exportSettings);
   const setExportSettings = useEditorStore((s) => s.setExportSettings);
   const setShowSettings = useEditorStore((s) => s.setShowSettings);
+  const currentProject = useEditorStore((s) => s.currentProject);
+  const isSaving = useEditorStore((s) => s.isSaving);
+  const projectError = useEditorStore((s) => s.projectError);
+  const projectWarnings = useEditorStore((s) => s.projectWarnings);
+  const setProjectError = useEditorStore((s) => s.setProjectError);
+  const clearProjectWarnings = useEditorStore((s) => s.clearProjectWarnings);
+  const openProject = useEditorStore((s) => s.openProject);
+  const createProject = useEditorStore((s) => s.createProject);
   const abortRef = useRef<AbortController | null>(null);
+  const [showProjectPicker, setShowProjectPicker] = useState(false);
+  const [projectLoading, setProjectLoading] = useState(true);
+
+  // Auto-load last project on startup
+  useEffect(() => {
+    (async () => {
+      try {
+        const last = await window.api.getLastProject();
+        if (last) {
+          await openProject(last);
+        } else {
+          // Auto-create a default project if none exist
+          const projects = await window.api.listProjects();
+          if (projects.length === 0) {
+            await createProject('My Project');
+          } else {
+            setShowProjectPicker(true);
+          }
+        }
+      } catch {
+        setShowProjectPicker(true);
+      } finally {
+        setProjectLoading(false);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Keyboard shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      const tag = (e.target as HTMLElement).tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+      const el = e.target as HTMLElement;
+      const tag = el.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el.isContentEditable) return;
 
       if (e.code === 'Delete' || e.code === 'Backspace') {
         const clipId = useEditorStore.getState().selectedClipId;
@@ -139,10 +176,36 @@ export default function App() {
     (p) => p.width === exportSettings.width && p.height === exportSettings.height,
   );
 
+  if (projectLoading) {
+    return (
+      <div className="project-loading">
+        <div className="project-loading-text">Loading project...</div>
+      </div>
+    );
+  }
+
+  if (!currentProject && showProjectPicker) {
+    return <ProjectPicker onClose={() => setShowProjectPicker(false)} />;
+  }
+
   return (
     <>
       <div className="titlebar">
         <div className="titlebar-spacer" />
+        <button
+          className="titlebar-project-name"
+          onClick={() => setShowProjectPicker(true)}
+          title="Switch project"
+        >
+          <svg className="titlebar-project-folder-icon" width="14" height="14" viewBox="0 0 16 16" fill="none">
+            <path d="M2 4a1.5 1.5 0 011.5-1.5h3.25l1.5 1.5H12.5A1.5 1.5 0 0114 5.5v6a1.5 1.5 0 01-1.5 1.5h-9A1.5 1.5 0 012 11.5V4z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
+          </svg>
+          <span>{currentProject || 'No Project'}</span>
+          {isSaving && <span className="titlebar-save-indicator" title="Saving..." />}
+          <svg className="titlebar-project-chevron" width="10" height="10" viewBox="0 0 10 10" fill="none">
+            <path d="M3 4l2 2 2-2" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        </button>
         <span className="titlebar-title">Video Editor</span>
         <div className="titlebar-actions">
           <button
@@ -166,6 +229,44 @@ export default function App() {
           </button>
         </div>
       </div>
+
+      {projectError && (
+        <div className="project-banner project-banner-error">
+          <div className="project-banner-content">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+              <circle cx="8" cy="8" r="6.5" stroke="currentColor" strokeWidth="1.2" />
+              <path d="M8 5v3.5M8 10.5v.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+            </svg>
+            <span>{projectError}</span>
+          </div>
+          <button className="project-banner-dismiss" onClick={() => setProjectError(null)}>
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+              <path d="M3 3l6 6M9 3l-6 6" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+            </svg>
+          </button>
+        </div>
+      )}
+
+      {projectWarnings.length > 0 && (
+        <div className="project-banner project-banner-warning">
+          <div className="project-banner-content">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+              <path d="M8 2L1.5 13h13L8 2z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
+              <path d="M8 6.5v3M8 11.5v.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+            </svg>
+            <span>{projectWarnings.join('; ')}</span>
+          </div>
+          <button className="project-banner-dismiss" onClick={clearProjectWarnings}>
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+              <path d="M3 3l6 6M9 3l-6 6" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+            </svg>
+          </button>
+        </div>
+      )}
+
+      {showProjectPicker && currentProject && (
+        <ProjectPicker onClose={() => setShowProjectPicker(false)} />
+      )}
 
       {showExportSettings && (
         <div className="export-overlay" onClick={() => setShowExportSettings(false)}>

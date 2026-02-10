@@ -318,6 +318,19 @@ export default function Timeline() {
           </div>
         ))}
 
+        {/* Add Track Row */}
+        <div className="track track-add" onClick={addTrack}>
+          <div className="track-header track-add-header">
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+              <path d="M6 2v8M2 6h8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+            </svg>
+            <span>Add Track</span>
+          </div>
+          <div className="track-content track-add-content">
+            <span className="track-add-hint">Click to add a new track</span>
+          </div>
+        </div>
+
         {/* Empty State */}
         {timelineClips.length === 0 && (
           <div className="timeline-empty">

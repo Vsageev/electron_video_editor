@@ -2,6 +2,7 @@ const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { spawnSync } = require('child_process');
+const { validateProject } = require('./scripts/validateProject.js');
 
 let mainWindow;
 
@@ -342,6 +343,219 @@ ipcMain.handle('get-api-keys', () => readApiKeys());
 ipcMain.handle('set-api-keys', (_evt, keys) => {
   writeApiKeys(keys);
   return { success: true };
+});
+
+// ---------------------------------------------------------------------------
+// Project file watching – detect external edits to project.json
+// ---------------------------------------------------------------------------
+
+let projectWatcher = null;
+let lastSaveTimestamp = 0; // used to ignore self-triggered change events
+
+function watchProjectFile(projectName) {
+  unwatchProjectFile();
+  const filePath = path.join(__dirname, 'projects', projectName, 'project.json');
+  if (!fs.existsSync(filePath)) return;
+
+  projectWatcher = fs.watch(filePath, { persistent: false }, (eventType) => {
+    if (eventType !== 'change') return;
+    // Ignore changes caused by our own saves (within 2s window)
+    if (Date.now() - lastSaveTimestamp < 2000) return;
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('project-file-changed');
+    }
+  });
+}
+
+function unwatchProjectFile() {
+  if (projectWatcher) {
+    projectWatcher.close();
+    projectWatcher = null;
+  }
+}
+
+ipcMain.handle('watch-project', (_evt, name) => {
+  watchProjectFile(name);
+});
+
+ipcMain.handle('unwatch-project', () => {
+  unwatchProjectFile();
+});
+
+// ---------------------------------------------------------------------------
+// Project management
+// ---------------------------------------------------------------------------
+
+const projectsDir = path.join(__dirname, 'projects');
+
+function ensureProjectsDir() {
+  if (!fs.existsSync(projectsDir)) fs.mkdirSync(projectsDir, { recursive: true });
+}
+
+ipcMain.handle('list-projects', async () => {
+  ensureProjectsDir();
+  const entries = await fs.promises.readdir(projectsDir, { withFileTypes: true });
+  return entries
+    .filter((e) => e.isDirectory() && e.name !== '.last')
+    .map((e) => e.name)
+    .sort();
+});
+
+ipcMain.handle('create-project', async (_evt, name) => {
+  ensureProjectsDir();
+  const dir = path.join(projectsDir, name);
+  await fs.promises.mkdir(path.join(dir, 'media'), { recursive: true });
+  return { success: true };
+});
+
+ipcMain.handle('load-project', async (_evt, name) => {
+  const filePath = path.join(projectsDir, name, 'project.json');
+  try {
+    const raw = await fs.promises.readFile(filePath, 'utf8');
+    let data;
+    try {
+      data = JSON.parse(raw);
+    } catch (parseErr) {
+      return { success: false, error: `Invalid JSON: ${parseErr.message}` };
+    }
+
+    // Validate project structure and integrity
+    const projectDir = path.join(projectsDir, name);
+    const { structureErrors, integrityErrors, warnings } = validateProject(data, projectDir);
+    if (structureErrors.length > 0 || integrityErrors.length > 0) {
+      const allErrors = [...structureErrors, ...integrityErrors];
+      return { success: false, error: allErrors.join('; ') };
+    }
+
+    return { success: true, data, warnings };
+  } catch (err) {
+    if (err.code === 'ENOENT') {
+      return { success: false, error: 'project.json not found' };
+    }
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle('save-project', async (_evt, name, data) => {
+  ensureProjectsDir();
+  const dir = path.join(projectsDir, name);
+  await fs.promises.mkdir(path.join(dir, 'media'), { recursive: true });
+  const filePath = path.join(dir, 'project.json');
+  const tmpPath = filePath + '.tmp';
+  try {
+    await fs.promises.writeFile(tmpPath, JSON.stringify(data, null, 2), 'utf8');
+    await fs.promises.rename(tmpPath, filePath);
+    lastSaveTimestamp = Date.now();
+    return { success: true };
+  } catch (err) {
+    // Clean up tmp if rename failed
+    try { await fs.promises.unlink(tmpPath); } catch {}
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle('copy-media-to-project', async (_evt, projectName, sourcePath) => {
+  const mediaDir = path.join(projectsDir, projectName, 'media');
+  await fs.promises.mkdir(mediaDir, { recursive: true });
+  const fileName = path.basename(sourcePath);
+  const destPath = path.join(mediaDir, fileName);
+
+  // Deduplicate: if already exists and same size, skip copy
+  try {
+    const srcStat = await fs.promises.stat(sourcePath);
+    const destStat = await fs.promises.stat(destPath);
+    if (srcStat.size === destStat.size) {
+      return { success: true, relativePath: 'media/' + fileName };
+    }
+  } catch {
+    // dest doesn't exist yet, proceed with copy
+  }
+
+  // Handle name collision: add numeric suffix
+  let finalName = fileName;
+  let finalDest = destPath;
+  const ext = path.extname(fileName);
+  const base = path.basename(fileName, ext);
+  let counter = 1;
+  while (true) {
+    try {
+      await fs.promises.access(finalDest);
+      // file exists with different size, try next name
+      finalName = `${base}_${counter}${ext}`;
+      finalDest = path.join(mediaDir, finalName);
+      counter++;
+    } catch {
+      break; // file doesn't exist, use this name
+    }
+  }
+
+  await fs.promises.copyFile(sourcePath, finalDest);
+
+  // Create empty metadata sidecar file if it doesn't exist
+  const mdPath = finalDest + '.md';
+  try {
+    await fs.promises.access(mdPath);
+  } catch {
+    await fs.promises.writeFile(mdPath, '', 'utf8');
+  }
+
+  return { success: true, relativePath: 'media/' + finalName };
+});
+
+ipcMain.handle('get-last-project', async () => {
+  const lastFile = path.join(projectsDir, '.last');
+  try {
+    const name = (await fs.promises.readFile(lastFile, 'utf8')).trim();
+    if (!name) return null;
+    // Verify project dir still exists
+    const dir = path.join(projectsDir, name);
+    if (fs.existsSync(path.join(dir, 'project.json'))) return name;
+    return null;
+  } catch {
+    return null;
+  }
+});
+
+ipcMain.handle('set-last-project', async (_evt, name) => {
+  ensureProjectsDir();
+  await fs.promises.writeFile(path.join(projectsDir, '.last'), name, 'utf8');
+});
+
+ipcMain.handle('delete-project', async (_evt, name) => {
+  const dir = path.join(projectsDir, name);
+  try {
+    await fs.promises.rm(dir, { recursive: true, force: true });
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle('get-project-dir', async (_evt, name) => {
+  return path.join(projectsDir, name);
+});
+
+// ---------------------------------------------------------------------------
+// Media metadata (.md sidecar files)
+// ---------------------------------------------------------------------------
+
+ipcMain.handle('read-media-metadata', async (_evt, mediaFilePath) => {
+  const mdPath = mediaFilePath + '.md';
+  try {
+    return await fs.promises.readFile(mdPath, 'utf8');
+  } catch {
+    return '';
+  }
+});
+
+ipcMain.handle('write-media-metadata', async (_evt, mediaFilePath, content) => {
+  const mdPath = mediaFilePath + '.md';
+  try {
+    await fs.promises.writeFile(mdPath, content, 'utf8');
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
 });
 
 ipcMain.handle('get-media-duration', async (_evt, filePath) => {

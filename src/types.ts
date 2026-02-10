@@ -56,6 +56,19 @@ export interface TimelineClip {
   mask?: ClipMask;
 }
 
+export interface ProjectData {
+  version: number;
+  name: string;
+  createdAt: string;
+  updatedAt: string;
+  tracks: number[];
+  trackIdCounter: number;
+  clipIdCounter: number;
+  exportSettings: { width: number; height: number; fps: number; bitrate: number };
+  mediaFiles: MediaFile[];
+  timelineClips: TimelineClip[];
+}
+
 export interface ContextMenuItem {
   label?: string;
   action?: () => void;
@@ -73,6 +86,23 @@ declare global {
       readFile: (filePath: string) => Promise<ArrayBuffer>;
       getApiKeys: () => Promise<Record<string, string>>;
       setApiKeys: (keys: Record<string, string>) => Promise<{ success: boolean }>;
+      // Project management
+      listProjects: () => Promise<string[]>;
+      createProject: (name: string) => Promise<{ success: boolean }>;
+      loadProject: (name: string) => Promise<{ success: boolean; data?: ProjectData; warnings?: string[]; error?: string }>;
+      saveProject: (name: string, data: ProjectData) => Promise<{ success: boolean; error?: string }>;
+      copyMediaToProject: (projectName: string, sourcePath: string) => Promise<{ success: boolean; relativePath?: string }>;
+      getLastProject: () => Promise<string | null>;
+      setLastProject: (name: string) => Promise<void>;
+      deleteProject: (name: string) => Promise<{ success: boolean; error?: string }>;
+      getProjectDir: (name: string) => Promise<string>;
+      // Media metadata
+      readMediaMetadata: (mediaFilePath: string) => Promise<string>;
+      writeMediaMetadata: (mediaFilePath: string, content: string) => Promise<{ success: boolean; error?: string }>;
+      // Project file watching
+      watchProject: (name: string) => Promise<void>;
+      unwatchProject: () => Promise<void>;
+      onProjectFileChanged: (callback: () => void) => () => void;
     };
   }
 }

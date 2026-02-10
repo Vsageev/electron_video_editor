@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { MediaFile, TimelineClip, AnimatableProp, EasingType, Keyframe } from '../types';
+import type { MediaFile, TimelineClip, AnimatableProp, EasingType, Keyframe, ProjectData } from '../types';
 
 function hasOverlap(
   trackClips: TimelineClip[],
@@ -79,9 +79,28 @@ interface EditorState {
   rippleEnabled: boolean;
   toggleRipple: () => void;
 
+  // Media metadata
+  mediaMetadata: Record<string, string>;  // mediaPath -> md content
+  mediaMetadataLoading: boolean;
+  loadMediaMetadata: (mediaPath: string) => Promise<void>;
+  saveMediaMetadata: (mediaPath: string, content: string) => Promise<void>;
+
   // Settings
   showSettings: boolean;
   setShowSettings: (v: boolean) => void;
+
+  // Project
+  currentProject: string | null;
+  isSaving: boolean;
+  projectError: string | null;
+  projectWarnings: string[];
+  projectDir: string | null;
+  createProject: (name: string) => Promise<void>;
+  openProject: (name: string) => Promise<void>;
+  saveProject: () => Promise<void>;
+  setProjectError: (msg: string | null) => void;
+  clearProjectWarnings: () => void;
+  closeProject: () => void;
 }
 
 export const useEditorStore = create<EditorState>((set, get) => ({
@@ -348,7 +367,229 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   rippleEnabled: false,
   toggleRipple: () => set((s) => ({ rippleEnabled: !s.rippleEnabled })),
 
+  // Media metadata
+  mediaMetadata: {},
+  mediaMetadataLoading: false,
+  loadMediaMetadata: async (mediaPath) => {
+    set({ mediaMetadataLoading: true });
+    try {
+      const content = await window.api.readMediaMetadata(mediaPath);
+      set((s) => ({
+        mediaMetadata: { ...s.mediaMetadata, [mediaPath]: content },
+        mediaMetadataLoading: false,
+      }));
+    } catch {
+      set({ mediaMetadataLoading: false });
+    }
+  },
+  saveMediaMetadata: async (mediaPath, content) => {
+    const result = await window.api.writeMediaMetadata(mediaPath, content);
+    if (result.success) {
+      set((s) => ({
+        mediaMetadata: { ...s.mediaMetadata, [mediaPath]: content },
+      }));
+    }
+  },
+
   // Settings
   showSettings: false,
   setShowSettings: (v) => set({ showSettings: v }),
+
+  // Project
+  currentProject: null,
+  isSaving: false,
+  projectError: null,
+  projectWarnings: [],
+  projectDir: null,
+  setProjectError: (msg) => set({ projectError: msg }),
+  clearProjectWarnings: () => set({ projectWarnings: [] }),
+
+  createProject: async (name) => {
+    try {
+      await window.api.createProject(name);
+      const dir = await window.api.getProjectDir(name);
+      set({
+        currentProject: name,
+        projectDir: dir,
+        projectError: null,
+        projectWarnings: [],
+        mediaFiles: [],
+        timelineClips: [],
+        tracks: [1, 2],
+        trackIdCounter: 2,
+        clipIdCounter: 0,
+        selectedClipId: null,
+        selectedMediaIndex: null,
+        currentTime: 0,
+        isPlaying: false,
+      });
+      await window.api.setLastProject(name);
+      // Save initial empty project
+      await get().saveProject();
+      // Start watching for external changes
+      await window.api.watchProject(name);
+    } catch (err: any) {
+      set({ projectError: err.message || 'Failed to create project' });
+    }
+  },
+
+  openProject: async (name) => {
+    try {
+      const result = await window.api.loadProject(name);
+      if (!result.success || !result.data) {
+        set({ projectError: result.error || 'Failed to load project' });
+        return;
+      }
+      const data = result.data;
+      const dir = await window.api.getProjectDir(name);
+
+      // Resolve relative media paths to absolute
+      const resolvedMedia = data.mediaFiles.map((mf) => ({
+        ...mf,
+        path: dir + '/' + mf.path,
+      }));
+      const resolvedClips = data.timelineClips.map((c) => ({
+        ...c,
+        mediaPath: dir + '/' + c.mediaPath,
+      }));
+
+      set({
+        currentProject: name,
+        projectDir: dir,
+        projectError: null,
+        projectWarnings: result.warnings || [],
+        mediaFiles: resolvedMedia,
+        timelineClips: resolvedClips,
+        tracks: data.tracks,
+        trackIdCounter: data.trackIdCounter,
+        clipIdCounter: data.clipIdCounter,
+        exportSettings: data.exportSettings,
+        selectedClipId: null,
+        selectedMediaIndex: null,
+        currentTime: 0,
+        isPlaying: false,
+      });
+      await window.api.setLastProject(name);
+      // Start watching for external changes
+      await window.api.watchProject(name);
+    } catch (err: any) {
+      set({ projectError: err.message || 'Failed to open project' });
+    }
+  },
+
+  saveProject: async () => {
+    const s = get();
+    if (!s.currentProject || s.isSaving) return;
+    set({ isSaving: true });
+    try {
+      const dir = s.projectDir || '';
+
+      // Convert absolute paths back to relative for storage
+      const relativeMedia = s.mediaFiles.map((mf) => ({
+        ...mf,
+        path: mf.path.startsWith(dir + '/') ? mf.path.slice(dir.length + 1) : mf.path,
+      }));
+      const relativeClips = s.timelineClips.map((c) => ({
+        ...c,
+        mediaPath: c.mediaPath.startsWith(dir + '/') ? c.mediaPath.slice(dir.length + 1) : c.mediaPath,
+      }));
+
+      // Try loading existing project to preserve createdAt
+      let createdAt: string;
+      try {
+        const existing = await window.api.loadProject(s.currentProject);
+        createdAt = existing.data?.createdAt || new Date().toISOString();
+      } catch {
+        createdAt = new Date().toISOString();
+      }
+
+      const projectData: ProjectData = {
+        version: 1,
+        name: s.currentProject,
+        createdAt,
+        updatedAt: new Date().toISOString(),
+        tracks: s.tracks,
+        trackIdCounter: s.trackIdCounter,
+        clipIdCounter: s.clipIdCounter,
+        exportSettings: s.exportSettings,
+        mediaFiles: relativeMedia,
+        timelineClips: relativeClips,
+      };
+
+      const result = await window.api.saveProject(s.currentProject, projectData);
+      if (!result.success) {
+        set({ projectError: `Save failed: ${result.error}` });
+      }
+    } catch (err: any) {
+      set({ projectError: `Save failed: ${err.message}` });
+    } finally {
+      set({ isSaving: false });
+    }
+  },
+
+  closeProject: () => {
+    window.api.unwatchProject();
+    set({
+      currentProject: null,
+      projectDir: null,
+      projectError: null,
+      projectWarnings: [],
+      mediaFiles: [],
+      timelineClips: [],
+      tracks: [1, 2],
+      trackIdCounter: 2,
+      clipIdCounter: 0,
+      selectedClipId: null,
+      selectedMediaIndex: null,
+      currentTime: 0,
+      isPlaying: false,
+    });
+  },
 }));
+
+// ---------------------------------------------------------------------------
+// Auto-save: debounced subscription to persistent state changes
+// ---------------------------------------------------------------------------
+
+let autoSaveTimer: ReturnType<typeof setTimeout> | null = null;
+
+// Fields that trigger auto-save when changed
+function getPersistentSnapshot(s: EditorState) {
+  return {
+    mediaFiles: s.mediaFiles,
+    timelineClips: s.timelineClips,
+    tracks: s.tracks,
+    trackIdCounter: s.trackIdCounter,
+    clipIdCounter: s.clipIdCounter,
+    exportSettings: s.exportSettings,
+  };
+}
+
+let lastSnapshot = JSON.stringify(getPersistentSnapshot(useEditorStore.getState()));
+
+useEditorStore.subscribe((state) => {
+  if (!state.currentProject) return;
+
+  const snapshot = JSON.stringify(getPersistentSnapshot(state));
+  if (snapshot === lastSnapshot) return;
+  lastSnapshot = snapshot;
+
+  if (autoSaveTimer) clearTimeout(autoSaveTimer);
+  autoSaveTimer = setTimeout(() => {
+    useEditorStore.getState().saveProject();
+  }, 2000);
+});
+
+// ---------------------------------------------------------------------------
+// External file change: reload project when project.json is edited outside
+// ---------------------------------------------------------------------------
+
+window.api.onProjectFileChanged(() => {
+  const s = useEditorStore.getState();
+  if (!s.currentProject || s.isSaving) return;
+  // Re-open the project to pick up external changes
+  s.openProject(s.currentProject).then(() => {
+    // Update the auto-save snapshot so we don't immediately re-save
+    lastSnapshot = JSON.stringify(getPersistentSnapshot(useEditorStore.getState()));
+  });
+});

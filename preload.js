@@ -9,4 +9,29 @@ contextBridge.exposeInMainWorld('api', {
   readFile: (filePath) => ipcRenderer.invoke('read-file', filePath),
   getApiKeys: () => ipcRenderer.invoke('get-api-keys'),
   setApiKeys: (keys) => ipcRenderer.invoke('set-api-keys', keys),
+
+  // Project management
+  listProjects: () => ipcRenderer.invoke('list-projects'),
+  createProject: (name) => ipcRenderer.invoke('create-project', name),
+  loadProject: (name) => ipcRenderer.invoke('load-project', name),
+  saveProject: (name, data) => ipcRenderer.invoke('save-project', name, data),
+  copyMediaToProject: (projectName, sourcePath) =>
+    ipcRenderer.invoke('copy-media-to-project', projectName, sourcePath),
+  getLastProject: () => ipcRenderer.invoke('get-last-project'),
+  setLastProject: (name) => ipcRenderer.invoke('set-last-project', name),
+  deleteProject: (name) => ipcRenderer.invoke('delete-project', name),
+  getProjectDir: (name) => ipcRenderer.invoke('get-project-dir', name),
+
+  // Media metadata
+  readMediaMetadata: (mediaFilePath) => ipcRenderer.invoke('read-media-metadata', mediaFilePath),
+  writeMediaMetadata: (mediaFilePath, content) => ipcRenderer.invoke('write-media-metadata', mediaFilePath, content),
+
+  // Project file watching
+  watchProject: (name) => ipcRenderer.invoke('watch-project', name),
+  unwatchProject: () => ipcRenderer.invoke('unwatch-project'),
+  onProjectFileChanged: (callback) => {
+    const handler = () => callback();
+    ipcRenderer.on('project-file-changed', handler);
+    return () => ipcRenderer.removeListener('project-file-changed', handler);
+  },
 });

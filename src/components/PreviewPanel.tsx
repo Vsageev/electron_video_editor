@@ -645,30 +645,7 @@ export default function PreviewPanel() {
     setCurrentTime(Math.min(s.duration, s.currentTime + 5));
   }, [setCurrentTime]);
 
-  // ---- Keyboard shortcuts ----
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if ((e.target as HTMLElement).tagName === 'INPUT') return;
-      switch (e.code) {
-        case 'Space':
-          e.preventDefault();
-          togglePlay();
-          break;
-        case 'ArrowLeft': {
-          const s = useEditorStore.getState();
-          setCurrentTime(Math.max(0, s.currentTime - (e.shiftKey ? 1 : 1 / 30)));
-          break;
-        }
-        case 'ArrowRight': {
-          const s = useEditorStore.getState();
-          setCurrentTime(Math.min(s.duration, s.currentTime + (e.shiftKey ? 1 : 1 / 30)));
-          break;
-        }
-      }
-    };
-    document.addEventListener('keydown', handleKeyDown);
-    return () => document.removeEventListener('keydown', handleKeyDown);
-  }, [togglePlay, setCurrentTime]);
+  // Keyboard shortcuts are handled globally in App.tsx — no duplicate listener here.
 
   // ---- Handle overlay ----
   const showHandles =
