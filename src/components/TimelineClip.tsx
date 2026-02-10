@@ -12,6 +12,8 @@ interface TimelineClipProps {
 export default memo(function TimelineClip({ clip, zoom, isSelected }: TimelineClipProps) {
   const { selectClip, removeClip, updateClip } = useEditorStore();
   const tracks = useEditorStore((s) => s.tracks);
+  const mediaFiles = useEditorStore((s) => s.mediaFiles);
+  const mediaType = mediaFiles.find((m) => m.path === clip.mediaPath)?.type ?? 'video';
 
   const [contextMenu, setContextMenu] = useState<{
     x: number;
@@ -141,7 +143,7 @@ export default memo(function TimelineClip({ clip, zoom, isSelected }: TimelineCl
   return (
     <>
       <div
-        className={`timeline-clip ${clip.type}${isSelected ? ' selected' : ''}`}
+        className={`timeline-clip ${mediaType}${isSelected ? ' selected' : ''}`}
         style={{ left, width }}
         onMouseDown={handleMouseDown}
         onContextMenu={handleContextMenu}

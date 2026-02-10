@@ -2,7 +2,9 @@ const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { spawnSync } = require('child_process');
+const { bundleComponent } = require('./scripts/bundleComponent.js');
 const { validateProject } = require('./scripts/validateProject.js');
+const { listBuiltinComponents, addBuiltinComponent } = require('./scripts/builtinComponents.js');
 
 let mainWindow;
 
@@ -259,8 +261,15 @@ ipcMain.handle('open-file-dialog', async () => {
   const result = await dialog.showOpenDialog(mainWindow, {
     properties: ['openFile', 'multiSelections'],
     filters: [
+      // Windows defaults to the first filter; put a combined filter first so users
+      // don't have to manually switch "file type" in Explorer to import audio/etc.
+      {
+        name: 'All Supported',
+        extensions: ['mp4', 'webm', 'mov', 'avi', 'mkv', 'ogg', 'mp3', 'wav', 'aac', 'flac', 'tsx', 'jsx'],
+      },
       { name: 'Video Files', extensions: ['mp4', 'webm', 'mov', 'avi', 'mkv', 'ogg'] },
       { name: 'Audio Files', extensions: ['mp3', 'wav', 'ogg', 'aac', 'flac'] },
+      { name: 'Components', extensions: ['tsx', 'jsx'] },
       { name: 'All Files', extensions: ['*'] },
     ],
   });
@@ -502,6 +511,24 @@ ipcMain.handle('copy-media-to-project', async (_evt, projectName, sourcePath) =>
   return { success: true, relativePath: 'media/' + finalName };
 });
 
+ipcMain.handle('delete-media-from-project', async (_evt, projectName, relativePath) => {
+  try {
+    const filePath = path.join(projectsDir, projectName, relativePath);
+    // Safety: ensure the resolved path is inside the project directory
+    const projectDir = path.join(projectsDir, projectName);
+    const resolved = path.resolve(filePath);
+    if (!resolved.startsWith(path.resolve(projectDir) + path.sep)) {
+      return { success: false, error: 'Invalid path' };
+    }
+    await fs.promises.unlink(resolved);
+    // Also remove the metadata sidecar if it exists
+    try { await fs.promises.unlink(resolved + '.md'); } catch {}
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
 ipcMain.handle('get-last-project', async () => {
   const lastFile = path.join(projectsDir, '.last');
   try {
@@ -574,4 +601,44 @@ ipcMain.handle('get-media-duration', async (_evt, filePath) => {
   } catch {
     return 0;
   }
+});
+
+// ---------------------------------------------------------------------------
+// Component bundling (TSX/JSX → IIFE via esbuild)
+// ---------------------------------------------------------------------------
+
+ipcMain.handle('bundle-component', async (_evt, projectName, sourcePath) => {
+  try {
+    const mediaDir = path.join(projectsDir, projectName, 'media');
+    const baseName = path.basename(sourcePath, path.extname(sourcePath));
+    const outFile = path.join(mediaDir, `${baseName}.component.js`);
+
+    const result = await bundleComponent(sourcePath, outFile);
+    if (!result.success) return result;
+
+    const relativePath = 'media/' + path.basename(outFile);
+    return { success: true, bundlePath: relativePath };
+  } catch (err) {
+    return { success: false, error: err.message || String(err) };
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Built-in components
+// ---------------------------------------------------------------------------
+
+const builtinComponentsDir = path.join(__dirname, 'builtinComponents');
+
+ipcMain.handle('list-builtin-components', async () => {
+  return await listBuiltinComponents(builtinComponentsDir);
+});
+
+ipcMain.handle('add-builtin-component', async (_evt, projectName, fileName) => {
+  return await addBuiltinComponent({
+    builtinDir: builtinComponentsDir,
+    projectsDir,
+    projectName,
+    fileName,
+    bundleComponent,
+  });
 });

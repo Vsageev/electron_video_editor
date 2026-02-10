@@ -17,6 +17,8 @@ contextBridge.exposeInMainWorld('api', {
   saveProject: (name, data) => ipcRenderer.invoke('save-project', name, data),
   copyMediaToProject: (projectName, sourcePath) =>
     ipcRenderer.invoke('copy-media-to-project', projectName, sourcePath),
+  deleteMediaFromProject: (projectName, relativePath) =>
+    ipcRenderer.invoke('delete-media-from-project', projectName, relativePath),
   getLastProject: () => ipcRenderer.invoke('get-last-project'),
   setLastProject: (name) => ipcRenderer.invoke('set-last-project', name),
   deleteProject: (name) => ipcRenderer.invoke('delete-project', name),
@@ -25,6 +27,15 @@ contextBridge.exposeInMainWorld('api', {
   // Media metadata
   readMediaMetadata: (mediaFilePath) => ipcRenderer.invoke('read-media-metadata', mediaFilePath),
   writeMediaMetadata: (mediaFilePath, content) => ipcRenderer.invoke('write-media-metadata', mediaFilePath, content),
+
+  // Component bundling
+  bundleComponent: (projectName, sourcePath) =>
+    ipcRenderer.invoke('bundle-component', projectName, sourcePath),
+
+  // Built-in components
+  listBuiltinComponents: () => ipcRenderer.invoke('list-builtin-components'),
+  addBuiltinComponent: (projectName, fileName) =>
+    ipcRenderer.invoke('add-builtin-component', projectName, fileName),
 
   // Project file watching
   watchProject: (name) => ipcRenderer.invoke('watch-project', name),

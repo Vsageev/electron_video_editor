@@ -24,19 +24,29 @@ export interface Keyframe {
 
 export type KeyframeMap = Partial<Record<AnimatableProp, Keyframe[]>>;
 
+export interface PropDefinition {
+  type: 'string' | 'number' | 'color' | 'boolean';
+  default: any;
+  label: string;
+  min?: number;
+  max?: number;
+  step?: number;
+}
+
 export interface MediaFile {
   path: string;
   name: string;
   ext: string;
-  type: 'video' | 'audio';
+  type: 'video' | 'audio' | 'component';
   duration: number;
+  bundlePath?: string;
+  propDefinitions?: Record<string, PropDefinition>;
 }
 
 export interface TimelineClip {
   id: number;
   mediaPath: string;
   mediaName: string;
-  type: 'video' | 'audio';
   track: number;
   startTime: number;
   duration: number;
@@ -54,6 +64,17 @@ export interface TimelineClip {
   keyframeIdCounter?: number;
   // Shape mask
   mask?: ClipMask;
+  // Component custom props
+  componentProps?: Record<string, any>;
+}
+
+export interface ComponentClipProps {
+  currentTime: number;
+  duration: number;
+  width: number;
+  height: number;
+  progress: number;
+  [key: string]: any;
 }
 
 export interface ProjectData {
@@ -92,6 +113,7 @@ declare global {
       loadProject: (name: string) => Promise<{ success: boolean; data?: ProjectData; warnings?: string[]; error?: string }>;
       saveProject: (name: string, data: ProjectData) => Promise<{ success: boolean; error?: string }>;
       copyMediaToProject: (projectName: string, sourcePath: string) => Promise<{ success: boolean; relativePath?: string }>;
+      deleteMediaFromProject: (projectName: string, relativePath: string) => Promise<{ success: boolean; error?: string }>;
       getLastProject: () => Promise<string | null>;
       setLastProject: (name: string) => Promise<void>;
       deleteProject: (name: string) => Promise<{ success: boolean; error?: string }>;
@@ -99,6 +121,13 @@ declare global {
       // Media metadata
       readMediaMetadata: (mediaFilePath: string) => Promise<string>;
       writeMediaMetadata: (mediaFilePath: string, content: string) => Promise<{ success: boolean; error?: string }>;
+      // Component bundling
+      bundleComponent: (projectName: string, sourcePath: string) => Promise<{ success: boolean; bundlePath?: string; error?: string }>;
+
+      // Built-in components
+      listBuiltinComponents: () => Promise<{ name: string; fileName: string }[]>;
+      addBuiltinComponent: (projectName: string, fileName: string) => Promise<{ success: boolean; sourcePath?: string; bundlePath?: string; error?: string }>;
+
       // Project file watching
       watchProject: (name: string) => Promise<void>;
       unwatchProject: () => Promise<void>;

@@ -2,7 +2,7 @@ import { useCallback, useMemo, useState } from 'react';
 import { useEditorStore } from '../store/editorStore';
 import { formatTime } from '../utils/formatTime';
 import { evaluateKeyframes } from '../utils/keyframeEngine';
-import type { AnimatableProp, EasingType, Keyframe, MaskShape, ClipMask } from '../types';
+import type { AnimatableProp, EasingType, Keyframe, MaskShape, ClipMask, PropDefinition } from '../types';
 
 const MASK_SHAPES: MaskShape[] = ['none', 'rectangle', 'ellipse'];
 const MASK_ANIMATABLE_PROPS: AnimatableProp[] = ['maskCenterX', 'maskCenterY', 'maskWidth', 'maskHeight', 'maskFeather'];
@@ -68,12 +68,13 @@ function KeyframeButton({
 }
 
 export default function PropertiesSidebar() {
-  const { timelineClips, selectedClipId, updateClip } = useEditorStore();
+  const { timelineClips, selectedClipId, updateClip, mediaFiles } = useEditorStore();
   const currentTime = useEditorStore((s) => s.currentTime);
   const addKeyframe = useEditorStore((s) => s.addKeyframe);
   const updateKeyframe = useEditorStore((s) => s.updateKeyframe);
   const removeKeyframe = useEditorStore((s) => s.removeKeyframe);
   const clip = timelineClips.find((c) => c.id === selectedClipId);
+  const clipMedia = clip ? mediaFiles.find((m) => m.path === clip.mediaPath) : undefined;
 
   const clipLocalTime = clip ? currentTime - clip.startTime : 0;
 
@@ -232,6 +233,16 @@ export default function PropertiesSidebar() {
     });
   }, []);
 
+  const handleComponentPropChange = useCallback(
+    (key: string, value: any) => {
+      if (!clip) return;
+      updateClip(clip.id, {
+        componentProps: { ...(clip.componentProps || {}), [key]: value },
+      });
+    },
+    [clip, updateClip],
+  );
+
   const renderTransformRow = (label: string, prop: AnimatableProp, step: string, min?: string) => {
     if (!clip) return null;
     const kfs = clip.keyframes?.[prop];
@@ -287,13 +298,55 @@ export default function PropertiesSidebar() {
                 <span className="property-label">Name</span>
                 <span className="property-value">{clip.mediaName}</span>
               </div>
-              <div className="property-row">
-                <span className="property-label">Type</span>
-                <span className="property-value" style={{ textTransform: 'capitalize' }}>
-                  {clip.type}
-                </span>
-              </div>
             </div>
+
+            {clipMedia?.type === 'component' && clipMedia.propDefinitions && Object.keys(clipMedia.propDefinitions).length > 0 && (
+              <div className="property-group">
+                <div className="property-group-title">Component Props</div>
+                {Object.entries(clipMedia.propDefinitions).map(([key, def]) => {
+                  const value = clip!.componentProps?.[key] ?? def.default;
+                  return (
+                    <div className="property-row" key={key}>
+                      <span className="property-label">{def.label}</span>
+                      {def.type === 'string' && (
+                        <input
+                          className="property-input"
+                          type="text"
+                          value={value}
+                          onChange={(e) => handleComponentPropChange(key, e.target.value)}
+                        />
+                      )}
+                      {def.type === 'number' && (
+                        <input
+                          className="property-input"
+                          type="number"
+                          step={def.step ?? 1}
+                          min={def.min}
+                          max={def.max}
+                          value={value}
+                          onChange={(e) => handleComponentPropChange(key, parseFloat(e.target.value) || 0)}
+                        />
+                      )}
+                      {def.type === 'color' && (
+                        <input
+                          type="color"
+                          value={value}
+                          onChange={(e) => handleComponentPropChange(key, e.target.value)}
+                          style={{ width: 48, height: 24, border: 'none', background: 'transparent', cursor: 'pointer' }}
+                        />
+                      )}
+                      {def.type === 'boolean' && (
+                        <input
+                          type="checkbox"
+                          checked={!!value}
+                          onChange={(e) => handleComponentPropChange(key, e.target.checked)}
+                        />
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
 
             <div className="property-group">
               <div className="property-group-title">Timing</div>
@@ -318,9 +371,7 @@ export default function PropertiesSidebar() {
               </div>
             </div>
 
-            {clip.type === 'video' && (
-              <>
-                <div className="property-group">
+            <div className="property-group">
                   <div className="property-group-title">
                     Transform
                     <button className="property-reset-btn" onClick={handleAddAllKeyframes} title="Add keyframe for all properties at current time">
@@ -472,8 +523,6 @@ export default function PropertiesSidebar() {
                     </div>
                   </div>
                 )}
-              </>
-            )}
 
             <div className="property-group">
               <div className="property-group-title">Trim</div>

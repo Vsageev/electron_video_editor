@@ -1,6 +1,7 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import { useEditorStore } from '../store/editorStore';
-import { isVideoExt, getMediaDuration, formatTime } from '../utils/formatTime';
+import { isVideoExt, isAudioExt, isComponentExt, getMediaDuration, formatTime } from '../utils/formatTime';
+import { loadComponent } from '../utils/componentLoader';
 import ContextMenu from './ContextMenu';
 import type { MediaFile, ContextMenuItem } from '../types';
 
@@ -37,6 +38,16 @@ Describe where this audio fits in the project.
 
 ## Tags
 #music #sfx`,
+  component: `# Component Notes
+
+## Description
+What this component renders.
+
+## Props Used
+- currentTime, duration, progress, width, height
+
+## Tags
+#component #overlay`,
 };
 
 export default function MediaSidebar() {
@@ -96,17 +107,46 @@ export default function MediaSidebar() {
     setEditingMetadata(false);
   }, []);
 
+  const [importError, setImportError] = useState<string | null>(null);
+  const [builtinComponents, setBuiltinComponents] = useState<{ name: string; fileName: string }[]>([]);
+  const [showBuiltins, setShowBuiltins] = useState(false);
+
+  // Load built-in component list
+  useEffect(() => {
+    window.api.listBuiltinComponents().then(setBuiltinComponents).catch(() => {});
+  }, []);
+
+  // Close dropdown on outside click
+  useEffect(() => {
+    if (!showBuiltins) return;
+    const handler = () => setShowBuiltins(false);
+    document.addEventListener('click', handler);
+    return () => document.removeEventListener('click', handler);
+  }, [showBuiltins]);
+
   const handleImport = useCallback(async () => {
     const files = await window.api.openFileDialog();
     if (!files.length) return;
+    setImportError(null);
 
     const newMediaFiles: MediaFile[] = [];
     for (const file of files) {
-      const type = isVideoExt(file.ext) ? 'video' : 'audio';
-      const duration = await getMediaDuration(file.path, type);
+      const type: MediaFile['type'] | null = isComponentExt(file.ext)
+        ? 'component'
+        : isVideoExt(file.ext)
+          ? 'video'
+          : isAudioExt(file.ext)
+            ? 'audio'
+            : null;
+
+      if (!type) {
+        setImportError(`Unsupported file type: ${file.name}`);
+        continue;
+      }
 
       let finalPath = file.path;
       let finalName = file.name;
+      let bundlePath: string | undefined;
 
       // Copy media into project folder if a project is active
       if (currentProject) {
@@ -117,15 +157,78 @@ export default function MediaSidebar() {
         }
       }
 
+      // Bundle component files
+      if (type === 'component') {
+        if (!currentProject) {
+          setImportError('Components require an active project. Create or open a project first.');
+          continue;
+        }
+        const bundleResult = await window.api.bundleComponent(currentProject, file.path);
+        if (!bundleResult.success) {
+          setImportError(`Failed to bundle ${file.name}: ${bundleResult.error}`);
+          // Clean up copied source file on failure — it was already copied but can't be used
+          continue;
+        }
+        bundlePath = projectDir + '/' + bundleResult.bundlePath;
+      }
+
+      const duration = type === 'component'
+        ? 5
+        : await getMediaDuration(file.path, type);
+
+      // Extract propDefinitions from component bundles
+      let propDefinitions;
+      if (type === 'component' && bundlePath) {
+        try {
+          const entry = await loadComponent(bundlePath);
+          propDefinitions = entry.propDefinitions;
+        } catch { /* ignore — component will still work without propDefinitions */ }
+      }
+
       newMediaFiles.push({
         path: finalPath,
         name: finalName,
         ext: file.ext,
-        type: type as 'video' | 'audio',
+        type,
         duration,
+        ...(bundlePath ? { bundlePath } : {}),
+        ...(propDefinitions ? { propDefinitions } : {}),
       });
     }
-    addMediaFiles(newMediaFiles);
+    if (newMediaFiles.length > 0) {
+      addMediaFiles(newMediaFiles);
+    }
+  }, [addMediaFiles, currentProject, projectDir]);
+
+  const handleAddBuiltin = useCallback(async (builtin: { name: string; fileName: string }) => {
+    if (!currentProject) {
+      setImportError('Components require an active project.');
+      return;
+    }
+    setImportError(null);
+    const result = await window.api.addBuiltinComponent(currentProject, builtin.fileName);
+    if (!result.success) {
+      setImportError(`Failed to add ${builtin.name}: ${result.error}`);
+      return;
+    }
+    const fullBundlePath = projectDir + '/' + result.bundlePath;
+    // Extract propDefinitions from bundle
+    let propDefinitions;
+    try {
+      const entry = await loadComponent(fullBundlePath);
+      propDefinitions = entry.propDefinitions;
+    } catch { /* ignore */ }
+
+    addMediaFiles([{
+      path: projectDir + '/' + result.sourcePath,
+      name: builtin.name,
+      ext: '.' + builtin.fileName.split('.').pop(),
+      type: 'component',
+      duration: 5,
+      bundlePath: fullBundlePath,
+      ...(propDefinitions ? { propDefinitions } : {}),
+    }]);
+    setShowBuiltins(false);
   }, [addMediaFiles, currentProject, projectDir]);
 
   const handleClick = useCallback(
@@ -167,12 +270,46 @@ export default function MediaSidebar() {
     <aside className="sidebar">
       <div className="sidebar-header">
         <span className="sidebar-label">MEDIA</span>
-        <button className="btn-icon" onClick={handleImport} title="Import media">
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-            <path d="M8 3v10M3 8h10" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-          </svg>
-        </button>
+        <div className="sidebar-header-actions">
+          {builtinComponents.length > 0 && (
+            <div className="builtin-dropdown-wrapper">
+              <button
+                className="btn-icon"
+                onClick={(e) => { e.stopPropagation(); setShowBuiltins((v) => !v); }}
+                title="Add built-in component"
+              >
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                  <path d="M5 3L2 8l3 5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+                  <path d="M11 3l3 5-3 5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </button>
+              {showBuiltins && (
+                <div className="builtin-dropdown">
+                  {builtinComponents.map((b) => (
+                    <button
+                      key={b.fileName}
+                      className="builtin-dropdown-item"
+                      onClick={() => handleAddBuiltin(b)}
+                    >
+                      {b.name}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+          <button className="btn-icon" onClick={handleImport} title="Import media">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+              <path d="M8 3v10M3 8h10" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+            </svg>
+          </button>
+        </div>
       </div>
+      {importError && (
+        <div className="media-import-error" onClick={() => setImportError(null)}>
+          {importError}
+        </div>
+      )}
       <div className="media-list">
         {mediaFiles.length === 0 ? (
           <div className="media-empty">
@@ -199,11 +336,17 @@ export default function MediaSidebar() {
               onDoubleClick={() => handleDoubleClick(media)}
               onContextMenu={(e) => handleContextMenu(e, media, idx)}
             >
-              <div className={`media-item-icon${media.type === 'audio' ? ' audio' : ''}`}>
+              <div className={`media-item-icon${media.type === 'audio' ? ' audio' : media.type === 'component' ? ' component' : ''}`}>
                 {media.type === 'video' ? (
                   <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
                     <rect x="2" y="4" width="12" height="8" rx="1.5" stroke="currentColor" strokeWidth="1.2" />
                     <path d="M7 7l3 1.5-3 1.5V7z" fill="currentColor" opacity="0.6" />
+                  </svg>
+                ) : media.type === 'component' ? (
+                  <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                    <path d="M5 3L2 8l3 5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+                    <path d="M11 3l3 5-3 5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+                    <path d="M9 2L7 14" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
                   </svg>
                 ) : (
                   <svg width="16" height="16" viewBox="0 0 16 16" fill="none">

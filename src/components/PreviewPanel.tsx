@@ -1,13 +1,13 @@
-import { useRef, useEffect, useCallback, useState, useMemo, memo } from 'react';
+import { useRef, useEffect, useCallback, useState, useMemo } from 'react';
 import { useEditorStore } from '../store/editorStore';
 import { formatTime } from '../utils/formatTime';
 import { filePathToFileUrl } from '../utils/fileUrl';
 import { getAnimatedTransform, getAnimatedMask } from '../utils/keyframeEngine';
-import type { TimelineClip, AnimatableProp, ClipMask } from '../types';
+import ClipLayer from './ClipLayer';
+import type { AnimatableProp, ClipMask } from '../types';
 
 type CornerDir = 'nw' | 'ne' | 'sw' | 'se';
 type EdgeDir = 'n' | 's' | 'e' | 'w';
-type HandleDir = CornerDir | EdgeDir;
 const CORNER_DIRS: CornerDir[] = ['nw', 'ne', 'sw', 'se'];
 const EDGE_DIRS: EdgeDir[] = ['n', 's', 'e', 'w'];
 
@@ -51,11 +51,9 @@ function buildClipPath(mask: ClipMask): string {
   if (mask.shape === 'ellipse') {
     const inner = `ellipse(${hw}% ${hh}% at ${cx}% ${cy}%)`;
     if (!mask.invert) return inner;
-    // Invert: polygon covering full area with hole via evenodd
     return `polygon(evenodd, 0% 0%, 100% 0%, 100% 100%, 0% 100%, 0% 0%, ${cx - hw}% ${cy}%, ${cx}% ${cy - hh}%, ${cx + hw}% ${cy}%, ${cx}% ${cy + hh}%, ${cx - hw}% ${cy}%)`;
   }
 
-  // rectangle
   const top = cy - hh;
   const right = 100 - (cx + hw);
   const bottom = 100 - (cy + hh);
@@ -66,104 +64,12 @@ function buildClipPath(mask: ClipMask): string {
   if (!mask.invert) {
     return `inset(${top}% ${right}% ${bottom}% ${left}%${rStr})`;
   }
-  // Invert via polygon with evenodd
   const l = left;
   const t = top;
   const rr = 100 - right;
   const bb = 100 - bottom;
   return `polygon(evenodd, 0% 0%, 100% 0%, 100% 100%, 0% 100%, 0% 0%, ${l}% ${t}%, ${rr}% ${t}%, ${rr}% ${bb}%, ${l}% ${bb}%, ${l}% ${t}%)`;
 }
-
-// ---------------------------------------------------------------------------
-// VideoLayer – renders one video clip on the canvas
-// ---------------------------------------------------------------------------
-
-const VideoLayer = memo(function VideoLayer({
-  clip,
-  globalTime,
-  isPlaying,
-  containerW,
-  containerH,
-  onNaturalSize,
-  onSelect,
-}: {
-  clip: TimelineClip;
-  globalTime: number;
-  isPlaying: boolean;
-  containerW: number;
-  containerH: number;
-  onNaturalSize: (id: number, w: number, h: number) => void;
-  onSelect: (id: number) => void;
-}) {
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const [natural, setNatural] = useState({ w: 0, h: 0 });
-
-  const localTime = globalTime - clip.startTime + clip.trimStart;
-  const src = useMemo(() => filePathToFileUrl(clip.mediaPath), [clip.mediaPath]);
-
-  // When metadata loads, store natural size and seek to correct frame
-  const handleMetadata = useCallback(() => {
-    const v = videoRef.current;
-    if (!v) return;
-    const w = v.videoWidth;
-    const h = v.videoHeight;
-    setNatural({ w, h });
-    onNaturalSize(clip.id, w, h);
-    v.currentTime = Math.max(0, localTime);
-    if (isPlaying) v.play().catch(() => {});
-  }, [clip.id, localTime, isPlaying, onNaturalSize]);
-
-  // Play / pause
-  useEffect(() => {
-    const v = videoRef.current;
-    if (!v || v.readyState < 1) return;
-    if (isPlaying) v.play().catch(() => {});
-    else v.pause();
-  }, [isPlaying]);
-
-  // Seek when paused (timeline scrubbing)
-  useEffect(() => {
-    if (isPlaying) return;
-    const v = videoRef.current;
-    if (!v || v.readyState < 1) return;
-    const target = Math.max(0, localTime);
-    if (Math.abs(v.currentTime - target) > 0.04) {
-      v.currentTime = target;
-    }
-  }, [localTime, isPlaying]);
-
-  const base = fitSize(natural.w, natural.h, containerW, containerH);
-  const clipLocalTime = globalTime - clip.startTime;
-  const { x, y, scale, scaleX, scaleY } = getAnimatedTransform(clip, clipLocalTime);
-  const animMask = getAnimatedMask(clip, clipLocalTime);
-
-  const style: React.CSSProperties =
-    base.w > 0
-      ? {
-          ...makeTransformStyle(x, y, scale, base.w, base.h, scaleX, scaleY),
-          cursor: 'pointer',
-          ...(animMask ? { clipPath: buildClipPath(animMask) } : {}),
-          ...(animMask && animMask.feather > 0 ? { filter: `blur(${animMask.feather}px)` } : {}),
-        }
-      : { position: 'absolute', opacity: 0, pointerEvents: 'none' };
-
-  const handleClick = useCallback((e: React.MouseEvent) => {
-    e.stopPropagation();
-    onSelect(clip.id);
-  }, [clip.id, onSelect]);
-
-  return (
-    <video
-      ref={videoRef}
-      src={src}
-      style={style}
-      preload="auto"
-      onLoadedMetadata={handleMetadata}
-      onMouseDown={handleClick}
-      playsInline
-    />
-  );
-});
 
 // ---------------------------------------------------------------------------
 // PreviewPanel
@@ -179,6 +85,7 @@ export default function PreviewPanel() {
 
   // ---- Store subscriptions ----
   const timelineClips = useEditorStore((s) => s.timelineClips);
+  const mediaFiles = useEditorStore((s) => s.mediaFiles);
   const selectedClipId = useEditorStore((s) => s.selectedClipId);
   const selectedClip = useEditorStore((s) => {
     const id = s.selectedClipId;
@@ -209,17 +116,15 @@ export default function PreviewPanel() {
 
   const selectClip = useEditorStore((s) => s.selectClip);
 
-  // Natural-size callback from VideoLayers
+  // Natural-size callback from ClipLayers
   const handleNaturalSize = useCallback((id: number, w: number, h: number) => {
     setNaturalSizes((prev) => ({ ...prev, [id]: { w, h } }));
   }, []);
 
-  // Select clip by clicking on it in preview
   const handleSelectClip = useCallback((id: number) => {
     selectClip(id);
   }, [selectClip]);
 
-  // Deselect when clicking empty preview area
   const handleWrapperClick = useCallback((e: React.MouseEvent) => {
     if (e.target === e.currentTarget) {
       selectClip(null);
@@ -231,22 +136,27 @@ export default function PreviewPanel() {
 
   const tracks = useEditorStore((s) => s.tracks);
 
-  const visibleVideoClips = useMemo(
+  // All visible clips at current time (no type filter)
+  const visibleClips = useMemo(
     () =>
       timelineClips
         .filter(
           (c) =>
-            c.type === 'video' &&
             currentTime >= c.startTime &&
             currentTime < c.startTime + c.duration,
         )
-        // Higher track (earlier in tracks array = top of timeline) renders last = on top
         .sort((a, b) => {
           const ai = tracks.indexOf(a.track);
           const bi = tracks.indexOf(b.track);
           return bi - ai;
         }),
     [timelineClips, currentTime, tracks],
+  );
+
+  // Helper to look up MediaFile for a clip
+  const getMediaFile = useCallback(
+    (mediaPath: string) => mediaFiles.find((m) => m.path === mediaPath),
+    [mediaFiles],
   );
 
   const timelineDuration = useMemo(() => {
@@ -330,11 +240,18 @@ export default function PreviewPanel() {
 
   // ---- Transform: move ----
   const getSelectedBase = useCallback(() => {
-    if (!selectedClip || selectedClip.type !== 'video') return { w: 0, h: 0 };
+    if (!selectedClip) return { w: 0, h: 0 };
+    const mediaFile = getMediaFile(selectedClip.mediaPath);
+    const mediaType = mediaFile?.type ?? 'video';
+    // Component and audio clips fill the container
+    if (mediaType === 'component' || mediaType === 'audio') {
+      return { w: wrapperSize.w, h: wrapperSize.h };
+    }
+    // Video clips use natural size
     const nat = naturalSizes[selectedClip.id];
     if (!nat) return { w: 0, h: 0 };
     return fitSize(nat.w, nat.h, wrapperSize.w, wrapperSize.h);
-  }, [selectedClip, naturalSizes, wrapperSize]);
+  }, [selectedClip, getMediaFile, naturalSizes, wrapperSize]);
 
   const setTransformProp = useCallback(
     (id: number, prop: AnimatableProp, value: number, localTime: number) => {
@@ -354,7 +271,7 @@ export default function PreviewPanel() {
 
   const handleMoveDown = useCallback(
     (e: React.MouseEvent) => {
-      if (!selectedClip || selectedClip.type !== 'video') return;
+      if (!selectedClip) return;
       if ((e.target as HTMLElement).dataset.handle) return;
       e.preventDefault();
       e.stopPropagation();
@@ -386,7 +303,7 @@ export default function PreviewPanel() {
   // ---- Transform: corner resize (uniform scale) ----
   const handleCornerResizeDown = useCallback(
     (e: React.MouseEvent, dir: CornerDir) => {
-      if (!selectedClip || selectedClip.type !== 'video') return;
+      if (!selectedClip) return;
       e.preventDefault();
       e.stopPropagation();
 
@@ -426,7 +343,7 @@ export default function PreviewPanel() {
   // ---- Transform: edge resize (non-uniform scaleX / scaleY) ----
   const handleEdgeResizeDown = useCallback(
     (e: React.MouseEvent, dir: EdgeDir) => {
-      if (!selectedClip || selectedClip.type !== 'video') return;
+      if (!selectedClip) return;
       e.preventDefault();
       e.stopPropagation();
 
@@ -492,7 +409,7 @@ export default function PreviewPanel() {
   // ---- Mask: move (drag mask center) ----
   const handleMaskMoveDown = useCallback(
     (e: React.MouseEvent) => {
-      if (!selectedClip?.mask || selectedClip.type !== 'video') return;
+      if (!selectedClip?.mask) return;
       if ((e.target as HTMLElement).dataset.maskhandle) return;
       e.preventDefault();
       e.stopPropagation();
@@ -506,7 +423,6 @@ export default function PreviewPanel() {
       const origCY = mask.centerY;
       const id = selectedClip.id;
 
-      // The transform box pixel size = base * scale * scaleX/Y
       const base = getSelectedBase();
       if (!base.w) return;
       const anim = getAnimatedTransform(selectedClip, clipLocalTime);
@@ -532,7 +448,7 @@ export default function PreviewPanel() {
   // ---- Mask: edge resize ----
   const handleMaskEdgeDown = useCallback(
     (e: React.MouseEvent, dir: EdgeDir) => {
-      if (!selectedClip?.mask || selectedClip.type !== 'video') return;
+      if (!selectedClip?.mask) return;
       e.preventDefault();
       e.stopPropagation();
 
@@ -570,7 +486,6 @@ export default function PreviewPanel() {
           setMaskProp(id, 'maskHeight', 'height', newH, clipLocalTime);
           setMaskProp(id, 'maskCenterY', 'centerY', origCY + dy / 2, clipLocalTime);
         } else {
-          // n
           const newH = Math.max(0.01, origH - dy);
           setMaskProp(id, 'maskHeight', 'height', newH, clipLocalTime);
           setMaskProp(id, 'maskCenterY', 'centerY', origCY + dy / 2, clipLocalTime);
@@ -589,7 +504,7 @@ export default function PreviewPanel() {
   // ---- Mask: corner resize (both width + height) ----
   const handleMaskCornerDown = useCallback(
     (e: React.MouseEvent, dir: CornerDir) => {
-      if (!selectedClip?.mask || selectedClip.type !== 'video') return;
+      if (!selectedClip?.mask) return;
       e.preventDefault();
       e.stopPropagation();
 
@@ -645,13 +560,10 @@ export default function PreviewPanel() {
     setCurrentTime(Math.min(s.duration, s.currentTime + 5));
   }, [setCurrentTime]);
 
-  // Keyboard shortcuts are handled globally in App.tsx — no duplicate listener here.
-
   // ---- Handle overlay ----
   const showHandles =
     selectedClip &&
-    selectedClip.type === 'video' &&
-    visibleVideoClips.some((c) => c.id === selectedClip.id);
+    visibleClips.some((c) => c.id === selectedClip.id);
 
   let handleStyle: React.CSSProperties | undefined;
   let selectedMask: ClipMask | null = null;
@@ -677,20 +589,46 @@ export default function PreviewPanel() {
   return (
     <div className="preview-container">
       <div className="preview-wrapper" ref={wrapperRef} onMouseDown={handleWrapperClick}>
-        {/* Timeline composite: one VideoLayer per visible video clip */}
+        {/* Timeline composite: one ClipLayer per visible clip */}
         {hasTimelineClips &&
-          visibleVideoClips.map((clip) => (
-            <VideoLayer
-              key={clip.id}
-              clip={clip}
-              globalTime={currentTime}
-              isPlaying={isPlaying}
-              containerW={wrapperSize.w}
-              containerH={wrapperSize.h}
-              onNaturalSize={handleNaturalSize}
-              onSelect={handleSelectClip}
-            />
-          ))}
+          visibleClips.map((clip) => {
+            const mediaFile = getMediaFile(clip.mediaPath);
+            const mediaType = mediaFile?.type ?? 'video';
+            const clipLocalTime = currentTime - clip.startTime;
+            const { x, y, scale, scaleX, scaleY } = getAnimatedTransform(clip, clipLocalTime);
+            const animMask = getAnimatedMask(clip, clipLocalTime);
+
+            // For video clips, use natural size; for others, use wrapper size
+            const nat = naturalSizes[clip.id];
+            const base = (mediaType === 'video' && nat)
+              ? fitSize(nat.w, nat.h, wrapperSize.w, wrapperSize.h)
+              : { w: wrapperSize.w, h: wrapperSize.h };
+
+            const style: React.CSSProperties =
+              base.w > 0
+                ? {
+                    ...makeTransformStyle(x, y, scale, base.w, base.h, scaleX, scaleY),
+                    overflow: 'hidden',
+                    ...(animMask ? { clipPath: buildClipPath(animMask) } : {}),
+                    ...(animMask && animMask.feather > 0 ? { filter: `blur(${animMask.feather}px)` } : {}),
+                  }
+                : { position: 'absolute', opacity: 0, pointerEvents: 'none' };
+
+            return (
+              <div key={clip.id} style={style}>
+                <ClipLayer
+                  clip={clip}
+                  mediaFile={mediaFile}
+                  globalTime={currentTime}
+                  isPlaying={isPlaying}
+                  containerW={base.w * scale * scaleX}
+                  containerH={base.h * scale * scaleY}
+                  onNaturalSize={handleNaturalSize}
+                  onSelect={handleSelectClip}
+                />
+              </div>
+            );
+          })}
 
         {/* Standalone preview (media sidebar click, no timeline clips) */}
         {showStandalone && (
@@ -738,7 +676,6 @@ export default function PreviewPanel() {
                 }}
                 onMouseDown={handleMaskMoveDown}
               >
-                {/* Mask corner handles */}
                 {CORNER_DIRS.map((dir) => (
                   <div
                     key={dir}
@@ -747,7 +684,6 @@ export default function PreviewPanel() {
                     onMouseDown={(e) => handleMaskCornerDown(e, dir)}
                   />
                 ))}
-                {/* Mask edge handles */}
                 {EDGE_DIRS.map((dir) => (
                   <div
                     key={dir}

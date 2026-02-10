@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 
 const require = createRequire(import.meta.url);
-const { validateProject } = require('./validateProject.js');
+const { validateProject } = require('../../scripts/validateProject.js');
 
 // --- Helpers ---
 
@@ -15,8 +15,9 @@ function makeValidProject(overrides = {}) {
     name: 'test-project',
     createdAt: '2024-01-01T00:00:00Z',
     updatedAt: '2024-01-01T00:00:00Z',
-    tracks: [0, 1],
+    tracks: [1, 2],
     trackIdCounter: 2,
+    // Renderer store persists clipIdCounter as "max used id" (not "next id").
     clipIdCounter: 2,
     exportSettings: { width: 1920, height: 1080, fps: 30, bitrate: 5000000 },
     mediaFiles: [
@@ -24,13 +25,13 @@ function makeValidProject(overrides = {}) {
     ],
     timelineClips: [
       {
-        id: 0, mediaPath: 'media/video.mp4', mediaName: 'video.mp4', type: 'video',
-        track: 0, startTime: 0, duration: 5, trimStart: 0, trimEnd: 0,
+        id: 1, mediaPath: 'media/video.mp4', mediaName: 'video.mp4', type: 'video',
+        track: 1, startTime: 0, duration: 5, trimStart: 0, trimEnd: 5,
         originalDuration: 10, x: 0, y: 0, scale: 1, scaleX: 1, scaleY: 1,
       },
       {
-        id: 1, mediaPath: 'media/video.mp4', mediaName: 'video.mp4', type: 'video',
-        track: 1, startTime: 0, duration: 5, trimStart: 0, trimEnd: 0,
+        id: 2, mediaPath: 'media/video.mp4', mediaName: 'video.mp4', type: 'video',
+        track: 2, startTime: 0, duration: 5, trimStart: 0, trimEnd: 5,
         originalDuration: 10, x: 0, y: 0, scale: 1, scaleX: 1, scaleY: 1,
       },
     ],
@@ -178,18 +179,18 @@ describe('validateProject', () => {
 
     it('detects duplicate clip IDs', () => {
       const data = makeValidProject();
-      data.timelineClips[1].id = 0; // same as clip 0
+      data.timelineClips[1].id = 1; // same as clip 0
       const result = validateProject(data);
       expect(result.integrityErrors).toEqual(
-        expect.arrayContaining([expect.stringMatching(/id 0 is duplicated/)])
+        expect.arrayContaining([expect.stringMatching(/id 1 is duplicated/)])
       );
     });
 
-    it('detects clip ID >= clipIdCounter', () => {
-      const data = makeValidProject({ clipIdCounter: 1 }); // clip id=1 >= counter=1
+    it('detects clipIdCounter that is smaller than max clip id', () => {
+      const data = makeValidProject({ clipIdCounter: 1 }); // max clip id=2, counter too small
       const result = validateProject(data);
       expect(result.integrityErrors).toEqual(
-        expect.arrayContaining([expect.stringMatching(/id 1 >= clipIdCounter/)])
+        expect.arrayContaining([expect.stringMatching(/clipIdCounter .* < max timelineClips\[\]\.id/i)])
       );
     });
 
@@ -204,13 +205,25 @@ describe('validateProject', () => {
       );
     });
 
+    it('detects duration that exceeds originalDuration - trimStart - trimEnd', () => {
+      const data = makeValidProject();
+      // originalDuration=10, trims leave at most 4s visible
+      data.timelineClips[0].trimStart = 3;
+      data.timelineClips[0].trimEnd = 3;
+      data.timelineClips[0].duration = 5;
+      const result = validateProject(data);
+      expect(result.integrityErrors).toEqual(
+        expect.arrayContaining([expect.stringMatching(/duration .* > originalDuration - trimStart - trimEnd/i)])
+      );
+    });
+
     it('detects overlapping clips on same track', () => {
       const data = makeValidProject();
       // Put both clips on same track, overlapping
-      data.timelineClips[0].track = 0;
+      data.timelineClips[0].track = 1;
       data.timelineClips[0].startTime = 0;
       data.timelineClips[0].duration = 5;
-      data.timelineClips[1].track = 0;
+      data.timelineClips[1].track = 1;
       data.timelineClips[1].startTime = 3; // overlaps with [0,5)
       data.timelineClips[1].duration = 5;
       const result = validateProject(data);
@@ -221,14 +234,31 @@ describe('validateProject', () => {
 
     it('allows non-overlapping clips on same track', () => {
       const data = makeValidProject();
-      data.timelineClips[0].track = 0;
+      data.timelineClips[0].track = 1;
       data.timelineClips[0].startTime = 0;
       data.timelineClips[0].duration = 3;
-      data.timelineClips[1].track = 0;
+      data.timelineClips[1].track = 1;
       data.timelineClips[1].startTime = 3; // starts exactly where 0 ends
       data.timelineClips[1].duration = 3;
       const result = validateProject(data);
       expect(result.integrityErrors.filter(e => e.includes('overlap'))).toEqual([]);
+    });
+  });
+
+  describe('robustness', () => {
+    it('does not throw when mediaFiles contains null entries', () => {
+      const data = makeValidProject({ mediaFiles: [null] });
+      expect(() => validateProject(data)).not.toThrow();
+      const result = validateProject(data);
+      expect(result.structureErrors.length).toBeGreaterThan(0);
+    });
+
+    it('rejects Infinity in numeric fields', () => {
+      const data = makeValidProject();
+      data.timelineClips[0].x = Infinity;
+      const result = validateProject(data);
+      expect(result.structureErrors.length).toBeGreaterThan(0);
+      expect(result.structureErrors.join(' ')).toMatch(/x/i);
     });
   });
 

@@ -1,5 +1,25 @@
 import { create } from 'zustand';
-import type { MediaFile, TimelineClip, AnimatableProp, EasingType, Keyframe, ProjectData } from '../types';
+import type { MediaFile, TimelineClip, AnimatableProp, EasingType, Keyframe, ProjectData, PropDefinition } from '../types';
+
+function toProjectRelativePath(filePath: string, projectDir: string | null): string | null {
+  if (!filePath || !projectDir) return null;
+  // Renderer may run on Windows (backslashes) while project data is stored with '/'.
+  const norm = (p: string) => p.replaceAll('\\', '/').replace(/\/+$/, '');
+  const fp = norm(filePath);
+  const dir = norm(projectDir);
+  return fp.startsWith(dir + '/') ? fp.slice(dir.length + 1) : null;
+}
+
+function buildDefaultComponentProps(
+  propDefinitions?: Record<string, PropDefinition>,
+): Record<string, any> | undefined {
+  if (!propDefinitions) return undefined;
+  const props: Record<string, any> = {};
+  for (const [key, def] of Object.entries(propDefinitions)) {
+    props[key] = def.default;
+  }
+  return Object.keys(props).length > 0 ? props : undefined;
+}
 
 function hasOverlap(
   trackClips: TimelineClip[],
@@ -25,8 +45,8 @@ interface EditorState {
 
   // Preview (standalone media preview when no timeline clips)
   previewMediaPath: string | null;
-  previewMediaType: 'video' | 'audio' | null;
-  setPreviewMedia: (path: string | null, type?: 'video' | 'audio') => void;
+  previewMediaType: 'video' | 'audio' | 'component' | null;
+  setPreviewMedia: (path: string | null, type?: 'video' | 'audio' | 'component') => void;
 
   // Tracks
   tracks: number[];
@@ -114,11 +134,62 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         ...files.filter((f) => !s.mediaFiles.some((m) => m.path === f.path)),
       ],
     })),
-  removeMediaFile: (index) =>
-    set((s) => ({
+  removeMediaFile: (index) => {
+    const s = get();
+    const media = s.mediaFiles[index];
+    if (!media) return;
+
+    // Remove clips that reference this media
+    const mediaPath = media.path;
+    const remainingClips = s.timelineClips.filter((c) => c.mediaPath !== mediaPath);
+    const selectedClipId =
+      s.selectedClipId != null && !remainingClips.some((c) => c.id === s.selectedClipId)
+        ? null
+        : s.selectedClipId;
+
+    const nextSelectedMediaIndex =
+      s.selectedMediaIndex == null
+        ? null
+        : s.selectedMediaIndex === index
+          ? null
+          : s.selectedMediaIndex > index
+            ? s.selectedMediaIndex - 1
+            : s.selectedMediaIndex;
+
+    const shouldClearPreview = s.previewMediaPath === mediaPath;
+    const nextPreviewMediaPath = shouldClearPreview ? null : s.previewMediaPath;
+    const nextPreviewMediaType = shouldClearPreview ? null : s.previewMediaType;
+
+    // Clear cached metadata for removed media (and bundle, if any).
+    const nextMediaMetadata = { ...s.mediaMetadata };
+    delete nextMediaMetadata[mediaPath];
+    if (media.bundlePath) delete nextMediaMetadata[media.bundlePath];
+
+    set({
       mediaFiles: s.mediaFiles.filter((_, i) => i !== index),
-      selectedMediaIndex: s.selectedMediaIndex === index ? null : s.selectedMediaIndex,
-    })),
+      selectedMediaIndex: nextSelectedMediaIndex,
+      timelineClips: remainingClips,
+      selectedClipId,
+      previewMediaPath: nextPreviewMediaPath,
+      previewMediaType: nextPreviewMediaType,
+      mediaMetadata: nextMediaMetadata,
+    });
+
+    // Delete file from project media folder
+    if (s.currentProject && s.projectDir) {
+      const rel = toProjectRelativePath(mediaPath, s.projectDir);
+      if (rel) {
+        window.api.deleteMediaFromProject(s.currentProject, rel).catch(() => {});
+      }
+      // Components also generate a bundled JS file in the project media folder.
+      if (media.bundlePath) {
+        const relBundle = toProjectRelativePath(media.bundlePath, s.projectDir);
+        if (relBundle) {
+          window.api.deleteMediaFromProject(s.currentProject, relBundle).catch(() => {});
+        }
+      }
+    }
+  },
   selectMedia: (index) => set({ selectedMediaIndex: index }),
 
   // Preview
@@ -160,11 +231,11 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       const trackClips = s.timelineClips.filter((c) => c.track === targetTrack);
       const startTime = trackClips.reduce((max, c) => Math.max(max, c.startTime + c.duration), 0);
       const newId = s.clipIdCounter + 1;
+      const componentProps = buildDefaultComponentProps(media.propDefinitions);
       const clip: TimelineClip = {
         id: newId,
         mediaPath: media.path,
         mediaName: media.name,
-        type: media.type,
         track: targetTrack,
         startTime,
         duration: media.duration,
@@ -176,6 +247,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         scale: 1,
         scaleX: 1,
         scaleY: 1,
+        ...(componentProps ? { componentProps } : {}),
       };
       return {
         timelineClips: [...s.timelineClips, clip],
@@ -190,11 +262,11 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         return s;
       }
       const newId = s.clipIdCounter + 1;
+      const componentProps = buildDefaultComponentProps(media.propDefinitions);
       const clip: TimelineClip = {
         id: newId,
         mediaPath: media.path,
         mediaName: media.name,
-        type: media.type,
         track,
         startTime,
         duration: media.duration,
@@ -206,6 +278,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         scale: 1,
         scaleX: 1,
         scaleY: 1,
+        ...(componentProps ? { componentProps } : {}),
       };
       return {
         timelineClips: [...s.timelineClips, clip],
@@ -447,6 +520,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       const resolvedMedia = data.mediaFiles.map((mf) => ({
         ...mf,
         path: dir + '/' + mf.path,
+        ...(mf.bundlePath ? { bundlePath: dir + '/' + mf.bundlePath } : {}),
       }));
       const resolvedClips = data.timelineClips.map((c) => ({
         ...c,
@@ -488,6 +562,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       const relativeMedia = s.mediaFiles.map((mf) => ({
         ...mf,
         path: mf.path.startsWith(dir + '/') ? mf.path.slice(dir.length + 1) : mf.path,
+        ...(mf.bundlePath ? { bundlePath: mf.bundlePath.startsWith(dir + '/') ? mf.bundlePath.slice(dir.length + 1) : mf.bundlePath } : {}),
       }));
       const relativeClips = s.timelineClips.map((c) => ({
         ...c,

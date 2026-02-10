@@ -140,6 +140,7 @@ export default function App() {
         (percent) => setExportProgress(percent),
         abort.signal,
         bitrate,
+        useEditorStore.getState().mediaFiles,
       );
 
       if (!abort.signal.aborted) {

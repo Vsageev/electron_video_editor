@@ -1,6 +1,11 @@
 import { Muxer, ArrayBufferTarget } from 'webm-muxer';
-import type { TimelineClip } from '../types';
+import type { TimelineClip, MediaFile } from '../types';
 import { getAnimatedTransform, getAnimatedMask } from './keyframeEngine';
+import { loadComponent } from './componentLoader';
+import { toCanvas } from 'html-to-image';
+import React from 'react';
+import { createRoot } from 'react-dom/client';
+import { flushSync } from 'react-dom';
 
 function fitSize(nw: number, nh: number, cw: number, ch: number) {
   if (!nw || !nh || !cw || !ch) return { w: 0, h: 0 };
@@ -45,10 +50,18 @@ export async function exportToVideo(
   onProgress: (percent: number) => void,
   abortSignal: AbortSignal,
   bitrate: number = 8_000_000,
+  mediaFiles: MediaFile[] = [],
 ): Promise<Blob> {
-  const videoClips = clips.filter((c) => c.type === 'video');
-  if (videoClips.length === 0) {
-    throw new Error('No video clips to export');
+  const getMediaType = (clip: TimelineClip) => {
+    const mf = mediaFiles.find((m) => m.path === clip.mediaPath);
+    return mf?.type ?? 'video';
+  };
+
+  const videoClips = clips.filter((c) => getMediaType(c) === 'video');
+  const componentClips = clips.filter((c) => getMediaType(c) === 'component');
+
+  if (videoClips.length === 0 && componentClips.length === 0) {
+    throw new Error('No video or component clips to export');
   }
 
   const totalDuration = Math.max(...clips.map((c) => c.startTime + c.duration));
@@ -69,6 +82,26 @@ export async function exportToVideo(
       videoElements.set(clip.id, video);
     }),
   );
+
+  // Load component bundles
+  const componentRenderers: Map<number, React.ComponentType<any>> = new Map();
+  for (const clip of componentClips) {
+    const mf = mediaFiles.find((m) => m.path === clip.mediaPath);
+    if (mf?.bundlePath) {
+      try {
+        const entry = await loadComponent(mf.bundlePath);
+        componentRenderers.set(clip.id, entry.Component);
+      } catch (e) {
+        console.warn(`Could not load component for ${clip.mediaName}:`, e);
+      }
+    }
+  }
+
+  // Hidden offscreen container for component rasterization
+  const offscreenDiv = document.createElement('div');
+  offscreenDiv.style.cssText = `position:fixed;left:-9999px;top:-9999px;width:${width}px;height:${height}px;overflow:hidden;`;
+  document.body.appendChild(offscreenDiv);
+  const offscreenRoot = createRoot(offscreenDiv);
 
   // Set up muxer with video + audio
   const hasAudio = true;
@@ -177,6 +210,51 @@ export async function exportToVideo(
       }
     }
 
+    // Draw component clips
+    for (const clip of componentClips) {
+      const clipEnd = clip.startTime + clip.duration;
+      if (timelineTime >= clip.startTime && timelineTime < clipEnd) {
+        const Component = componentRenderers.get(clip.id);
+        if (!Component) continue;
+
+        const currentTime = timelineTime - clip.startTime;
+        const progress = clip.duration > 0 ? currentTime / clip.duration : 0;
+        const animTime = timelineTime - clip.startTime;
+        const { x, y, scale, scaleX, scaleY } = getAnimatedTransform(clip, animTime);
+        const scaledW = width * scale * scaleX;
+        const scaledH = height * scale * scaleY;
+        const drawX = (width - scaledW) / 2 + x * width;
+        const drawY = (height - scaledH) / 2 + y * height;
+
+        try {
+          flushSync(() => {
+            offscreenRoot.render(
+              React.createElement('div', { style: { width: scaledW, height: scaledH } },
+                React.createElement(Component, {
+                  currentTime,
+                  duration: clip.duration,
+                  width: scaledW,
+                  height: scaledH,
+                  progress,
+                  ...(clip.componentProps || {}),
+                })
+              )
+            );
+          });
+
+          const rasterCanvas = await toCanvas(offscreenDiv, {
+            width: scaledW,
+            height: scaledH,
+            canvasWidth: scaledW,
+            canvasHeight: scaledH,
+          });
+          ctx.drawImage(rasterCanvas, drawX, drawY, scaledW, scaledH);
+        } catch (e) {
+          console.warn(`Component rasterization failed for ${clip.mediaName}:`, e);
+        }
+      }
+    }
+
     // Create VideoFrame and encode
     const timestamp = frameIdx * frameDuration * 1_000_000; // microseconds
     const frame = new VideoFrame(canvas, {
@@ -201,10 +279,14 @@ export async function exportToVideo(
   // Flush remaining video frames
   await videoEncoder.flush();
 
-  // Render audio offline
-  if (hasAudio) {
+  // Render audio offline (video + audio clips have audio, component clips don't)
+  const audioSourceClips = clips.filter((c) => {
+    const t = getMediaType(c);
+    return t === 'video' || t === 'audio';
+  });
+  if (hasAudio && audioSourceClips.length > 0) {
     try {
-      await renderAudio(videoClips, totalDuration, muxer);
+      await renderAudio(audioSourceClips, totalDuration, muxer);
     } catch (e) {
       console.warn('Audio encoding failed, exporting without audio:', e);
     }
@@ -213,8 +295,10 @@ export async function exportToVideo(
   muxer.finalize();
   videoEncoder.close();
 
-  // Clean up video elements
+  // Clean up video elements and offscreen container
   for (const v of videoElements.values()) v.src = '';
+  offscreenRoot.unmount();
+  offscreenDiv.remove();
 
   onProgress(100);
 
