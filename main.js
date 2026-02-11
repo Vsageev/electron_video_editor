@@ -265,9 +265,10 @@ ipcMain.handle('open-file-dialog', async () => {
       // don't have to manually switch "file type" in Explorer to import audio/etc.
       {
         name: 'All Supported',
-        extensions: ['mp4', 'webm', 'mov', 'avi', 'mkv', 'ogg', 'mp3', 'wav', 'aac', 'flac', 'tsx', 'jsx'],
+        extensions: ['mp4', 'webm', 'mov', 'avi', 'mkv', 'ogg', 'mp3', 'wav', 'aac', 'flac', 'tsx', 'jsx', 'png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'],
       },
       { name: 'Video Files', extensions: ['mp4', 'webm', 'mov', 'avi', 'mkv', 'ogg'] },
+      { name: 'Image Files', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'] },
       { name: 'Audio Files', extensions: ['mp3', 'wav', 'ogg', 'aac', 'flac'] },
       { name: 'Components', extensions: ['tsx', 'jsx'] },
       { name: 'All Files', extensions: ['*'] },
@@ -588,6 +589,10 @@ ipcMain.handle('write-media-metadata', async (_evt, mediaFilePath, content) => {
 ipcMain.handle('get-media-duration', async (_evt, filePath) => {
   try {
     const ext = path.extname(filePath).toLowerCase();
+    // Images have no intrinsic duration; return a default of 5 seconds
+    const imageExts = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg'];
+    if (imageExts.includes(ext)) return 5;
+
     // Fast, dependency-free parsing for ISO BMFF containers. This works even if
     // Chromium can't decode the codec (e.g. HEVC in MP4) and thus reports 0s.
     if (ext === '.mp4' || ext === '.mov' || ext === '.m4v' || ext === '.m4a') {

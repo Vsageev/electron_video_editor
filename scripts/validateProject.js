@@ -37,7 +37,44 @@ const keyframeSchema = z.object({
 
 const keyframeMapSchema = z.record(animatablePropSchema, z.array(keyframeSchema)).optional();
 
-const mediaTypeSchema = z.enum(['video', 'audio', 'component']);
+const mediaTypeSchema = z.enum(['video', 'audio', 'component', 'image']);
+
+const propDefinitionSchema = z.discriminatedUnion('type', [
+  z.object({
+    type: z.literal('string'),
+    default: z.string(),
+    label: z.string().min(1),
+  }),
+  z.object({
+    type: z.literal('number'),
+    default: finiteNumber(),
+    label: z.string().min(1),
+    min: finiteNumber().optional(),
+    max: finiteNumber().optional(),
+    step: finiteNumber().optional(),
+  }),
+  z.object({
+    type: z.literal('color'),
+    default: z.string(),
+    label: z.string().min(1),
+  }),
+  z.object({
+    type: z.literal('boolean'),
+    default: z.boolean(),
+    label: z.string().min(1),
+  }),
+  z.object({
+    type: z.literal('enum'),
+    default: z.string(),
+    label: z.string().min(1),
+    options: z.array(z.string().min(1)),
+  }),
+  z.object({
+    type: z.enum(['media', 'component']),
+    default: z.string(),
+    label: z.string().min(1),
+  }),
+]);
 
 const mediaFileSchema = z.object({
   path: z.string().min(1),
@@ -46,6 +83,7 @@ const mediaFileSchema = z.object({
   type: mediaTypeSchema,
   duration: finiteNumber().nonnegative(),
   bundlePath: z.string().optional(),
+  propDefinitions: z.record(z.string().min(1), propDefinitionSchema).optional(),
 });
 
 const timelineClipSchema = z.object({
@@ -67,6 +105,7 @@ const timelineClipSchema = z.object({
   keyframes: keyframeMapSchema,
   keyframeIdCounter: z.number().int().nonnegative().optional(),
   mask: clipMaskSchema.optional(),
+  componentProps: z.record(z.any()).optional(),
 });
 
 const exportSettingsSchema = z.object({
@@ -93,6 +132,24 @@ const projectDataSchema = z.object({
 
 function isFiniteNumber(v) {
   return typeof v === 'number' && Number.isFinite(v);
+}
+
+function matchesPropType(value, type) {
+  if (value == null) return false;
+  switch (type) {
+    case 'string':
+    case 'color':
+    case 'enum':
+    case 'media':
+    case 'component':
+      return typeof value === 'string';
+    case 'number':
+      return isFiniteNumber(value);
+    case 'boolean':
+      return typeof value === 'boolean';
+    default:
+      return false;
+  }
 }
 
 /**
@@ -123,9 +180,17 @@ function validateProject(data, projectDir) {
 
   // Build sets defensively so malformed arrays never crash validation.
   const mediaPaths = new Set();
+  const mediaByPath = new Map();
+  const componentMediaPaths = new Set();
   for (const mf of data.mediaFiles) {
     if (!mf || typeof mf !== 'object') continue;
-    if (typeof mf.path === 'string' && mf.path.length > 0) mediaPaths.add(mf.path);
+    if (typeof mf.path === 'string' && mf.path.length > 0) {
+      mediaPaths.add(mf.path);
+      mediaByPath.set(mf.path, mf);
+      if (mf.type === 'component') {
+        componentMediaPaths.add(mf.path);
+      }
+    }
   }
 
   const trackSet = new Set();
@@ -211,6 +276,42 @@ function validateProject(data, projectDir) {
         }
       }
     }
+
+    const media = typeof clip.mediaPath === 'string' ? mediaByPath.get(clip.mediaPath) : undefined;
+    const propDefinitions = media?.propDefinitions;
+    if (propDefinitions && typeof propDefinitions === 'object' && clip.componentProps && typeof clip.componentProps === 'object') {
+      const knownPropKeys = new Set(Object.keys(propDefinitions));
+      for (const [propName, propValue] of Object.entries(clip.componentProps)) {
+        // Allow child props objects (e.g. "overlay:props") for media-type props
+        if (propName.endsWith(':props') && typeof propValue === 'object' && propValue !== null) continue;
+        const def = propDefinitions[propName];
+        if (!def) {
+          warnings.push(`timelineClips[${i}].componentProps.${propName} is not defined in mediaFiles propDefinitions`);
+          continue;
+        }
+        if (!matchesPropType(propValue, def.type)) {
+          integrityErrors.push(
+            `timelineClips[${i}].componentProps.${propName} has value type "${typeof propValue}" but expected "${def.type}"`
+          );
+          continue;
+        }
+        if (def.type === 'enum' && !def.options.includes(propValue)) {
+          integrityErrors.push(
+            `timelineClips[${i}].componentProps.${propName} must be one of [${def.options.join(', ')}]`
+          );
+        }
+        if ((def.type === 'media' || def.type === 'component') && propValue !== '' && !mediaPaths.has(propValue)) {
+          warnings.push(
+            `timelineClips[${i}].componentProps.${propName} references missing media path "${propValue}"`
+          );
+        }
+      }
+      for (const key of knownPropKeys) {
+        if (!(key in clip.componentProps)) {
+          warnings.push(`timelineClips[${i}].componentProps is missing "${key}" defined in mediaFiles propDefinitions`);
+        }
+      }
+    }
   }
 
   // clipIdCounter must be >= max clip id (accepts both "max id" and "next id" semantics).
@@ -227,6 +328,73 @@ function validateProject(data, projectDir) {
     if (mfSeen.has(mf.path)) warnings.push(`mediaFiles contains duplicate path: ${mf.path}`);
     mfSeen.add(mf.path);
     if (mf.type === 'component' && !mf.bundlePath) warnings.push(`component media missing bundlePath: ${mf.path}`);
+    if (mf.propDefinitions && typeof mf.propDefinitions === 'object') {
+      for (const [propName, def] of Object.entries(mf.propDefinitions)) {
+        if (!def || typeof def !== 'object') continue;
+
+        if (typeof def.min === 'number' && typeof def.max === 'number' && def.min > def.max) {
+          integrityErrors.push(`mediaFiles "${mf.path}" propDefinitions.${propName}: min (${def.min}) > max (${def.max})`);
+        }
+        if (typeof def.step === 'number' && def.step <= 0) {
+          integrityErrors.push(`mediaFiles "${mf.path}" propDefinitions.${propName}: step must be > 0`);
+        }
+
+        if (!matchesPropType(def.default, def.type)) {
+          integrityErrors.push(
+            `mediaFiles "${mf.path}" propDefinitions.${propName}: default has type "${typeof def.default}" but expected "${def.type}"`
+          );
+          continue;
+        }
+
+        if (def.type === 'enum') {
+          if (!Array.isArray(def.options) || def.options.length === 0) {
+            integrityErrors.push(
+              `mediaFiles "${mf.path}" propDefinitions.${propName}: options must be a non-empty string array`
+            );
+            continue;
+          }
+          const seen = new Set();
+          for (const option of def.options) {
+            if (typeof option !== 'string' || option.length === 0) {
+              integrityErrors.push(
+                `mediaFiles "${mf.path}" propDefinitions.${propName}: options must contain only non-empty strings`
+              );
+              continue;
+            }
+            if (seen.has(option)) {
+              integrityErrors.push(
+                `mediaFiles "${mf.path}" propDefinitions.${propName}: options contains duplicate value "${option}"`
+              );
+            }
+            seen.add(option);
+          }
+          if (!def.options.includes(def.default)) {
+            integrityErrors.push(
+              `mediaFiles "${mf.path}" propDefinitions.${propName}: default "${def.default}" must exist in options`
+            );
+          }
+        }
+
+        if ((def.type === 'media' || def.type === 'component') && def.default !== '' && !mediaPaths.has(def.default)) {
+          warnings.push(
+            `mediaFiles "${mf.path}" propDefinitions.${propName}: default media path "${def.default}" is missing`
+          );
+        }
+
+        if (def.type === 'number' && typeof def.default === 'number') {
+          if (typeof def.min === 'number' && def.default < def.min) {
+            integrityErrors.push(
+              `mediaFiles "${mf.path}" propDefinitions.${propName}: default (${def.default}) < min (${def.min})`
+            );
+          }
+          if (typeof def.max === 'number' && def.default > def.max) {
+            integrityErrors.push(
+              `mediaFiles "${mf.path}" propDefinitions.${propName}: default (${def.default}) > max (${def.max})`
+            );
+          }
+        }
+      }
+    }
   }
 
   // Overlap detection per track

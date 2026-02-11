@@ -7,6 +7,7 @@ import Timeline from './Timeline';
 import PropertiesSidebar from './PropertiesSidebar';
 import ApiKeysModal from './ApiKeysModal';
 import ProjectPicker from './ProjectPicker';
+import Tooltip from './Tooltip';
 
 const RESOLUTION_PRESETS = [
   { label: '4K (3840×2160)', width: 3840, height: 2160 },
@@ -193,31 +194,33 @@ export default function App() {
     <>
       <div className="titlebar">
         <div className="titlebar-spacer" />
-        <button
-          className="titlebar-project-name"
-          onClick={() => setShowProjectPicker(true)}
-          title="Switch project"
-        >
-          <svg className="titlebar-project-folder-icon" width="14" height="14" viewBox="0 0 16 16" fill="none">
-            <path d="M2 4a1.5 1.5 0 011.5-1.5h3.25l1.5 1.5H12.5A1.5 1.5 0 0114 5.5v6a1.5 1.5 0 01-1.5 1.5h-9A1.5 1.5 0 012 11.5V4z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
-          </svg>
-          <span>{currentProject || 'No Project'}</span>
-          {isSaving && <span className="titlebar-save-indicator" title="Saving..." />}
-          <svg className="titlebar-project-chevron" width="10" height="10" viewBox="0 0 10 10" fill="none">
-            <path d="M3 4l2 2 2-2" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
-          </svg>
-        </button>
-        <span className="titlebar-title">Video Editor</span>
-        <div className="titlebar-actions">
+        <Tooltip label="Switch project" pos="bottom">
           <button
-            className="btn-icon titlebar-settings-btn"
-            onClick={() => setShowSettings(true)}
-            title="Settings"
+            className="titlebar-project-name"
+            onClick={() => setShowProjectPicker(true)}
           >
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-              <path d="M6.5 1.75a.75.75 0 011.5 0v.3a5.5 5.5 0 011.68.7l.21-.22a.75.75 0 011.06 1.06l-.21.22a5.5 5.5 0 01.7 1.68h.3a.75.75 0 010 1.5h-.3a5.5 5.5 0 01-.7 1.68l.22.21a.75.75 0 01-1.06 1.06l-.22-.21a5.5 5.5 0 01-1.68.7v.3a.75.75 0 01-1.5 0v-.3a5.5 5.5 0 01-1.68-.7l-.21.22a.75.75 0 01-1.06-1.06l.21-.22a5.5 5.5 0 01-.7-1.68h-.3a.75.75 0 010-1.5h.3a5.5 5.5 0 01.7-1.68l-.22-.21A.75.75 0 014.6 2.53l.22.21a5.5 5.5 0 011.68-.7v-.3zM8 10a2 2 0 100-4 2 2 0 000 4z" fill="currentColor"/>
+            <svg className="titlebar-project-folder-icon" width="14" height="14" viewBox="0 0 16 16" fill="none">
+              <path d="M2 4a1.5 1.5 0 011.5-1.5h3.25l1.5 1.5H12.5A1.5 1.5 0 0114 5.5v6a1.5 1.5 0 01-1.5 1.5h-9A1.5 1.5 0 012 11.5V4z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
+            </svg>
+            <span>{currentProject || 'No Project'}</span>
+            {isSaving && <span className="titlebar-save-indicator" />}
+            <svg className="titlebar-project-chevron" width="10" height="10" viewBox="0 0 10 10" fill="none">
+              <path d="M3 4l2 2 2-2" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
             </svg>
           </button>
+        </Tooltip>
+        <span className="titlebar-title">Video Editor</span>
+        <div className="titlebar-actions">
+          <Tooltip label="Settings" pos="bottom">
+            <button
+              className="btn-icon titlebar-settings-btn"
+              onClick={() => setShowSettings(true)}
+            >
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                <path d="M6.5 1.75a.75.75 0 011.5 0v.3a5.5 5.5 0 011.68.7l.21-.22a.75.75 0 011.06 1.06l-.21.22a5.5 5.5 0 01.7 1.68h.3a.75.75 0 010 1.5h-.3a5.5 5.5 0 01-.7 1.68l.22.21a.75.75 0 01-1.06 1.06l-.22-.21a5.5 5.5 0 01-1.68.7v.3a.75.75 0 01-1.5 0v-.3a5.5 5.5 0 01-1.68-.7l-.21.22a.75.75 0 01-1.06-1.06l.21-.22a5.5 5.5 0 01-.7-1.68h-.3a.75.75 0 010-1.5h.3a5.5 5.5 0 01.7-1.68l-.22-.21A.75.75 0 014.6 2.53l.22.21a5.5 5.5 0 011.68-.7v-.3zM8 10a2 2 0 100-4 2 2 0 000 4z" fill="currentColor"/>
+              </svg>
+            </button>
+          </Tooltip>
           <button
             className="btn-export"
             onClick={() => setShowExportSettings(true)}
@@ -240,7 +243,7 @@ export default function App() {
             </svg>
             <span>{projectError}</span>
           </div>
-          <button className="project-banner-dismiss" onClick={() => setProjectError(null)}>
+          <button className="project-banner-dismiss" onClick={() => setProjectError(null)} title="Dismiss" aria-label="Dismiss error">
             <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
               <path d="M3 3l6 6M9 3l-6 6" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
             </svg>
@@ -257,7 +260,7 @@ export default function App() {
             </svg>
             <span>{projectWarnings.join('; ')}</span>
           </div>
-          <button className="project-banner-dismiss" onClick={clearProjectWarnings}>
+          <button className="project-banner-dismiss" onClick={clearProjectWarnings} title="Dismiss" aria-label="Dismiss warnings">
             <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
               <path d="M3 3l6 6M9 3l-6 6" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
             </svg>

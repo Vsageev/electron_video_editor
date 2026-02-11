@@ -4,6 +4,7 @@ import { formatTime } from '../utils/formatTime';
 import { filePathToFileUrl } from '../utils/fileUrl';
 import { getAnimatedTransform, getAnimatedMask } from '../utils/keyframeEngine';
 import ClipLayer from './ClipLayer';
+import Tooltip from './Tooltip';
 import type { AnimatableProp, ClipMask } from '../types';
 
 type CornerDir = 'nw' | 'ne' | 'sw' | 'se';
@@ -164,8 +165,11 @@ export default function PreviewPanel() {
     return Math.max(...timelineClips.map((c) => c.startTime + c.duration));
   }, [timelineClips, hasTimelineClips]);
 
-  const showStandalone =
+  const showStandaloneVideo =
     !hasTimelineClips && !!previewMediaPath && previewMediaType === 'video';
+  const showStandaloneImage =
+    !hasTimelineClips && !!previewMediaPath && previewMediaType === 'image';
+  const showStandalone = showStandaloneVideo || showStandaloneImage;
   const showPlaceholder = !hasTimelineClips && !showStandalone;
 
   // ---- Keep store duration in sync with timeline ----
@@ -198,7 +202,7 @@ export default function PreviewPanel() {
 
   // ---- Standalone preview (media sidebar click, no timeline clips) ----
   useEffect(() => {
-    if (!showStandalone) return;
+    if (!showStandaloneVideo) return;
     const v = standaloneRef.current;
     if (!v) return;
     const onMeta = () => setDuration(v.duration);
@@ -215,18 +219,18 @@ export default function PreviewPanel() {
       v.removeEventListener('timeupdate', onTime);
       v.removeEventListener('ended', onEnd);
     };
-  }, [showStandalone, setDuration, setCurrentTime, setIsPlaying]);
+  }, [showStandaloneVideo, setDuration, setCurrentTime, setIsPlaying]);
 
   useEffect(() => {
-    if (!showStandalone) return;
+    if (!showStandaloneVideo) return;
     const v = standaloneRef.current;
     if (!v) return;
     if (isPlaying) v.play().catch(() => {});
     else v.pause();
-  }, [isPlaying, showStandalone]);
+  }, [isPlaying, showStandaloneVideo]);
 
   useEffect(() => {
-    if (!showStandalone) return;
+    if (!showStandaloneVideo) return;
     if (isSeekedByStandalone.current) {
       isSeekedByStandalone.current = false;
       return;
@@ -236,7 +240,7 @@ export default function PreviewPanel() {
     if (Math.abs(v.currentTime - currentTime) > 0.05) {
       v.currentTime = currentTime;
     }
-  }, [currentTime, showStandalone]);
+  }, [currentTime, showStandaloneVideo]);
 
   // ---- Transform: move ----
   const getSelectedBase = useCallback(() => {
@@ -247,7 +251,7 @@ export default function PreviewPanel() {
     if (mediaType === 'component' || mediaType === 'audio') {
       return { w: wrapperSize.w, h: wrapperSize.h };
     }
-    // Video clips use natural size
+    // Video and image clips use natural size
     const nat = naturalSizes[selectedClip.id];
     if (!nat) return { w: 0, h: 0 };
     return fitSize(nat.w, nat.h, wrapperSize.w, wrapperSize.h);
@@ -598,9 +602,9 @@ export default function PreviewPanel() {
             const { x, y, scale, scaleX, scaleY } = getAnimatedTransform(clip, clipLocalTime);
             const animMask = getAnimatedMask(clip, clipLocalTime);
 
-            // For video clips, use natural size; for others, use wrapper size
+            // For video/image clips, use natural size; for others, use wrapper size
             const nat = naturalSizes[clip.id];
-            const base = (mediaType === 'video' && nat)
+            const base = ((mediaType === 'video' || mediaType === 'image') && nat)
               ? fitSize(nat.w, nat.h, wrapperSize.w, wrapperSize.h)
               : { w: wrapperSize.w, h: wrapperSize.h };
 
@@ -631,13 +635,20 @@ export default function PreviewPanel() {
           })}
 
         {/* Standalone preview (media sidebar click, no timeline clips) */}
-        {showStandalone && (
+        {showStandaloneVideo && (
           <video
             ref={standaloneRef}
             src={filePathToFileUrl(previewMediaPath!)}
             className="standalone-video"
             preload="auto"
             playsInline
+          />
+        )}
+        {showStandaloneImage && (
+          <img
+            src={filePathToFileUrl(previewMediaPath!)}
+            style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }}
+            draggable={false}
           />
         )}
 
@@ -715,30 +726,36 @@ export default function PreviewPanel() {
           <span className="timecode">{formatTime(currentTime)}</span>
         </div>
         <div className="transport-center">
-          <button className="btn-transport" onClick={skipBack} title="Skip back">
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-              <path d="M12 3L6 8l6 5V3z" fill="currentColor" />
-              <rect x="3" y="3" width="2" height="10" rx="0.5" fill="currentColor" />
-            </svg>
-          </button>
-          <button className="btn-transport btn-play" onClick={togglePlay} title="Play/Pause">
-            {isPlaying ? (
-              <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
-                <rect x="4" y="3" width="3" height="12" rx="1" fill="currentColor" />
-                <rect x="11" y="3" width="3" height="12" rx="1" fill="currentColor" />
+          <Tooltip label="Skip back">
+            <button className="btn-transport" onClick={skipBack}>
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                <path d="M12 3L6 8l6 5V3z" fill="currentColor" />
+                <rect x="3" y="3" width="2" height="10" rx="0.5" fill="currentColor" />
               </svg>
-            ) : (
-              <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
-                <path d="M5 3l10 6-10 6V3z" fill="currentColor" />
+            </button>
+          </Tooltip>
+          <Tooltip label="Play/Pause" pos="bottom">
+            <button className="btn-transport btn-play" onClick={togglePlay}>
+              {isPlaying ? (
+                <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+                  <rect x="4" y="3" width="3" height="12" rx="1" fill="currentColor" />
+                  <rect x="11" y="3" width="3" height="12" rx="1" fill="currentColor" />
+                </svg>
+              ) : (
+                <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+                  <path d="M5 3l10 6-10 6V3z" fill="currentColor" />
+                </svg>
+              )}
+            </button>
+          </Tooltip>
+          <Tooltip label="Skip forward">
+            <button className="btn-transport" onClick={skipForward}>
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                <path d="M4 3l6 5-6 5V3z" fill="currentColor" />
+                <rect x="11" y="3" width="2" height="10" rx="0.5" fill="currentColor" />
               </svg>
-            )}
-          </button>
-          <button className="btn-transport" onClick={skipForward} title="Skip forward">
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-              <path d="M4 3l6 5-6 5V3z" fill="currentColor" />
-              <rect x="11" y="3" width="2" height="10" rx="0.5" fill="currentColor" />
-            </svg>
-          </button>
+            </button>
+          </Tooltip>
         </div>
         <div className="transport-right">
           <span className="timecode">{formatTime(duration)}</span>

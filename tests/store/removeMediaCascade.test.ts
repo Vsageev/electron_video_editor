@@ -84,5 +84,99 @@ describe('editorStore.removeMediaFile cascading behavior', () => {
 
     expect((window as any).api.deleteMediaFromProject).not.toHaveBeenCalled();
   });
-});
 
+  it('clears component reference props and persists cleaned project data', async () => {
+    const { useEditorStore } = await import('../../src/store/editorStore');
+
+    const projectDir = '/tmp/projects/p1';
+    const removedComponentPath = projectDir + '/media/child.tsx';
+    const removedBundlePath = projectDir + '/media/child.component.js';
+    const parentComponentPath = projectDir + '/media/parent.tsx';
+    const createdAt = '2024-01-01T00:00:00.000Z';
+
+    (window as any).api.loadProject.mockResolvedValue({ success: true, data: { createdAt } });
+
+    useEditorStore.setState({
+      currentProject: 'p1',
+      projectDir,
+      mediaFiles: [
+        {
+          path: removedComponentPath,
+          name: 'child.tsx',
+          ext: '.tsx',
+          type: 'component',
+          duration: 5,
+          bundlePath: removedBundlePath,
+        },
+        {
+          path: parentComponentPath,
+          name: 'parent.tsx',
+          ext: '.tsx',
+          type: 'component',
+          duration: 5,
+          propDefinitions: {
+            child: { type: 'media', default: '', label: 'Child' },
+            title: { type: 'string', default: 'hello', label: 'Title' },
+          },
+        },
+      ],
+      timelineClips: [
+        {
+          id: 10,
+          mediaPath: parentComponentPath,
+          mediaName: 'parent.tsx',
+          track: 1,
+          startTime: 0,
+          duration: 5,
+          trimStart: 0,
+          trimEnd: 0,
+          originalDuration: 5,
+          x: 0,
+          y: 0,
+          scale: 1,
+          scaleX: 1,
+          scaleY: 1,
+          componentProps: {
+            child: removedComponentPath,
+            title: 'kept',
+          },
+        },
+      ],
+      tracks: [1],
+      trackIdCounter: 1,
+      clipIdCounter: 10,
+      exportSettings: { width: 1920, height: 1080, fps: 30, bitrate: 5_000_000 },
+    } as any);
+
+    useEditorStore.getState().removeMediaFile(0);
+    const s = useEditorStore.getState();
+    expect(s.mediaFiles.map((m) => m.path)).toEqual([parentComponentPath]);
+    expect(s.timelineClips[0]?.componentProps?.child).toBe('');
+    expect(s.timelineClips[0]?.componentProps?.title).toBe('kept');
+
+    await s.saveProject();
+    expect((window as any).api.saveProject).toHaveBeenCalledWith(
+      'p1',
+      expect.objectContaining({
+        createdAt,
+        mediaFiles: [
+          expect.objectContaining({
+            path: 'media/parent.tsx',
+          }),
+        ],
+        timelineClips: [
+          expect.objectContaining({
+            mediaPath: 'media/parent.tsx',
+            componentProps: expect.objectContaining({
+              child: '',
+              title: 'kept',
+            }),
+          }),
+        ],
+      })
+    );
+
+    expect((window as any).api.deleteMediaFromProject).toHaveBeenCalledWith('p1', 'media/child.tsx');
+    expect((window as any).api.deleteMediaFromProject).toHaveBeenCalledWith('p1', 'media/child.component.js');
+  });
+});

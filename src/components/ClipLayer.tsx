@@ -1,7 +1,8 @@
-import { useRef, useEffect, useCallback, useState, useMemo, memo, Component } from 'react';
+import React, { useRef, useEffect, useCallback, useState, useMemo, memo, Component } from 'react';
 import { filePathToFileUrl } from '../utils/fileUrl';
 import { loadComponent } from '../utils/componentLoader';
-import type { TimelineClip, MediaFile, ComponentClipProps } from '../types';
+import { useEditorStore } from '../store/editorStore';
+import type { TimelineClip, MediaFile, ComponentClipProps, PropDefinition } from '../types';
 
 // ---------------------------------------------------------------------------
 // ErrorBoundary for user components
@@ -109,6 +110,85 @@ const VideoRenderer = memo(function VideoRenderer({
 // ComponentRenderer — renders user-authored TSX component
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// ChildComponentRenderer — renders a component referenced by a 'component' prop
+// ---------------------------------------------------------------------------
+
+function ChildComponentRenderer({
+  bundlePath,
+  clipProps,
+  childProps,
+}: {
+  bundlePath: string;
+  clipProps: ComponentClipProps;
+  childProps?: Record<string, any>;
+}) {
+  const [ChildComp, setChildComp] = useState<React.ComponentType<ComponentClipProps> | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    loadComponent(bundlePath)
+      .then((entry) => { if (!cancelled) setChildComp(() => entry.Component); })
+      .catch(() => { /* silently fail — parent shows placeholder */ });
+    return () => { cancelled = true; };
+  }, [bundlePath]);
+
+  if (!ChildComp) return null;
+  return <ChildComp {...clipProps} {...childProps} />;
+}
+
+// ---------------------------------------------------------------------------
+// useResolvedComponentProps — resolves 'media' type props to React elements
+// ---------------------------------------------------------------------------
+
+function useResolvedComponentProps(
+  componentProps: Record<string, any> | undefined,
+  propDefinitions: Record<string, PropDefinition> | undefined,
+  clipProps: ComponentClipProps,
+): Record<string, any> {
+  const mediaFiles = useEditorStore((s) => s.mediaFiles);
+
+  return useMemo(() => {
+    if (!componentProps || !propDefinitions) return componentProps || {};
+    const resolved: Record<string, any> = { ...componentProps };
+    for (const [key, def] of Object.entries(propDefinitions)) {
+      if (def.type !== 'media') continue;
+      const path = componentProps[key];
+      if (!path) continue;
+      const media = mediaFiles.find((m) => m?.path === path);
+      if (!media) continue;
+
+      if (media.type === 'component' && media.bundlePath) {
+        const childProps = componentProps[`${key}:props`] as Record<string, any> | undefined;
+        resolved[key] = (
+          <ChildComponentRenderer bundlePath={media.bundlePath} clipProps={clipProps} childProps={childProps} />
+        );
+      } else if (media.type === 'video') {
+        resolved[key] = (
+          <video
+            src={filePathToFileUrl(media.path)}
+            style={{ width: '100%', height: '100%', objectFit: 'contain' }}
+            autoPlay muted loop playsInline preload="auto"
+          />
+        );
+      } else if (media.type === 'image') {
+        resolved[key] = (
+          <img
+            src={filePathToFileUrl(media.path)}
+            style={{ width: '100%', height: '100%', objectFit: 'contain' }}
+            draggable={false}
+          />
+        );
+      } else if (media.type === 'audio') {
+        resolved[key] = null;
+      }
+      // Remove the nested props key from resolved so it doesn't leak to the component
+      delete resolved[`${key}:props`];
+    }
+    return resolved;
+  }, [componentProps, propDefinitions, mediaFiles, clipProps]);
+}
+
 const ComponentRenderer = memo(function ComponentRenderer({
   clip,
   mediaFile,
@@ -125,6 +205,7 @@ const ComponentRenderer = memo(function ComponentRenderer({
   onSelect: (id: number) => void;
 }) {
   const [UserComponent, setUserComponent] = useState<React.ComponentType<ComponentClipProps> | null>(null);
+  const [parentPropDefs, setParentPropDefs] = useState<Record<string, PropDefinition> | undefined>(undefined);
   const [loadError, setLoadError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -134,7 +215,12 @@ const ComponentRenderer = memo(function ComponentRenderer({
     }
     let cancelled = false;
     loadComponent(mediaFile.bundlePath)
-      .then((entry) => { if (!cancelled) setUserComponent(() => entry.Component); })
+      .then((entry) => {
+        if (!cancelled) {
+          setUserComponent(() => entry.Component);
+          setParentPropDefs(entry.propDefinitions);
+        }
+      })
       .catch((err) => { if (!cancelled) setLoadError(String(err)); });
     return () => { cancelled = true; };
   }, [mediaFile.bundlePath]);
@@ -143,6 +229,19 @@ const ComponentRenderer = memo(function ComponentRenderer({
     e.stopPropagation();
     onSelect(clip.id);
   }, [clip.id, onSelect]);
+
+  const currentTime = globalTime - clip.startTime;
+  const progress = clip.duration > 0 ? currentTime / clip.duration : 0;
+
+  const clipProps: ComponentClipProps = useMemo(() => ({
+    currentTime,
+    duration: clip.duration,
+    width: containerW,
+    height: containerH,
+    progress,
+  }), [currentTime, clip.duration, containerW, containerH, progress]);
+
+  const resolvedProps = useResolvedComponentProps(clip.componentProps, parentPropDefs, clipProps);
 
   if (loadError) {
     return (
@@ -171,22 +270,51 @@ const ComponentRenderer = memo(function ComponentRenderer({
     );
   }
 
-  const currentTime = globalTime - clip.startTime;
-  const progress = clip.duration > 0 ? currentTime / clip.duration : 0;
-
   return (
     <div style={{ width: '100%', height: '100%', cursor: 'pointer' }} onMouseDown={handleClick}>
       <ComponentErrorBoundary clipId={clip.id}>
         <UserComponent
-          currentTime={currentTime}
-          duration={clip.duration}
-          width={containerW}
-          height={containerH}
-          progress={progress}
-          {...(clip.componentProps || {})}
+          {...clipProps}
+          {...resolvedProps}
         />
       </ComponentErrorBoundary>
     </div>
+  );
+});
+
+// ---------------------------------------------------------------------------
+// ImageRenderer — renders static image clips
+// ---------------------------------------------------------------------------
+
+const ImageRenderer = memo(function ImageRenderer({
+  clip,
+  onNaturalSize,
+  onSelect,
+}: {
+  clip: TimelineClip;
+  onNaturalSize: (id: number, w: number, h: number) => void;
+  onSelect: (id: number) => void;
+}) {
+  const src = useMemo(() => filePathToFileUrl(clip.mediaPath), [clip.mediaPath]);
+
+  const handleLoad = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
+    const img = e.currentTarget;
+    onNaturalSize(clip.id, img.naturalWidth, img.naturalHeight);
+  }, [clip.id, onNaturalSize]);
+
+  const handleClick = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation();
+    onSelect(clip.id);
+  }, [clip.id, onSelect]);
+
+  return (
+    <img
+      src={src}
+      style={{ width: '100%', height: '100%', objectFit: 'contain', cursor: 'pointer' }}
+      onLoad={handleLoad}
+      onMouseDown={handleClick}
+      draggable={false}
+    />
   );
 });
 
@@ -262,11 +390,22 @@ export default memo(function ClipLayer({
   }, [clip.id, onNaturalSize]);
 
   // For component/audio clips, report container size as natural size
+  // (image clips report natural size via onLoad in ImageRenderer)
   useEffect(() => {
     if (mediaType === 'component' || mediaType === 'audio') {
       onNaturalSize(clip.id, containerW, containerH);
     }
   }, [mediaType, clip.id, containerW, containerH, onNaturalSize]);
+
+  if (mediaType === 'image') {
+    return (
+      <ImageRenderer
+        clip={clip}
+        onNaturalSize={onNaturalSize}
+        onSelect={onSelect}
+      />
+    );
+  }
 
   if (mediaType === 'component') {
     return (

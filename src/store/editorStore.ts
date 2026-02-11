@@ -45,8 +45,8 @@ interface EditorState {
 
   // Preview (standalone media preview when no timeline clips)
   previewMediaPath: string | null;
-  previewMediaType: 'video' | 'audio' | 'component' | null;
-  setPreviewMedia: (path: string | null, type?: 'video' | 'audio' | 'component') => void;
+  previewMediaType: 'video' | 'audio' | 'component' | 'image' | null;
+  setPreviewMedia: (path: string | null, type?: 'video' | 'audio' | 'component' | 'image') => void;
 
   // Tracks
   tracks: number[];
@@ -98,6 +98,8 @@ interface EditorState {
   // Ripple edit
   rippleEnabled: boolean;
   toggleRipple: () => void;
+  autoSnapEnabled: boolean;
+  toggleAutoSnap: () => void;
 
   // Media metadata
   mediaMetadata: Record<string, string>;  // mediaPath -> md content
@@ -141,7 +143,24 @@ export const useEditorStore = create<EditorState>((set, get) => ({
 
     // Remove clips that reference this media
     const mediaPath = media.path;
-    const remainingClips = s.timelineClips.filter((c) => c.mediaPath !== mediaPath);
+    const remainingClips = s.timelineClips
+      .filter((c) => c.mediaPath !== mediaPath)
+      .map((clip) => {
+        if (!clip.componentProps) return clip;
+        const clipMedia = s.mediaFiles.find((mf) => mf.path === clip.mediaPath);
+        const defs = clipMedia?.propDefinitions;
+        if (!defs) return clip;
+
+        let changed = false;
+        const nextProps = { ...clip.componentProps };
+        for (const [key, val] of Object.entries(nextProps)) {
+          if (defs[key]?.type === 'media' && val === mediaPath) {
+            nextProps[key] = '';
+            changed = true;
+          }
+        }
+        return changed ? { ...clip, componentProps: nextProps } : clip;
+      });
     const selectedClipId =
       s.selectedClipId != null && !remainingClips.some((c) => c.id === s.selectedClipId)
         ? null
@@ -304,9 +323,25 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       };
     }),
   updateClip: (clipId, updates) =>
-    set((s) => ({
-      timelineClips: s.timelineClips.map((c) => (c.id === clipId ? { ...c, ...updates } : c)),
-    })),
+    set((s) => {
+      const clip = s.timelineClips.find((c) => c.id === clipId);
+      if (!clip) return s;
+
+      const nextClip: TimelineClip = { ...clip, ...updates };
+      const placementChanged =
+        updates.track !== undefined || updates.startTime !== undefined || updates.duration !== undefined;
+
+      if (placementChanged) {
+        const trackClips = s.timelineClips.filter((c) => c.track === nextClip.track);
+        if (hasOverlap(trackClips, nextClip.startTime, nextClip.duration, clipId)) {
+          return s;
+        }
+      }
+
+      return {
+        timelineClips: s.timelineClips.map((c) => (c.id === clipId ? nextClip : c)),
+      };
+    }),
   selectClip: (clipId) => set({ selectedClipId: clipId }),
 
   // Keyframes
@@ -411,23 +446,20 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       const leftDuration = currentTime - clip.startTime;
       const rightDuration = clipEnd - currentTime;
 
+      // Determine if this is a flex-duration clip (component/image)
+      const media = s.mediaFiles.find((m) => m?.path === clip.mediaPath);
+      const isFlexDuration = media?.type === 'component' || media?.type === 'image';
+
       // Left clip: modify the existing clip in place
-      const leftClip: TimelineClip = {
-        ...clip,
-        duration: leftDuration,
-        trimEnd: clip.originalDuration - clip.trimStart - leftDuration,
-      };
+      const leftClip: TimelineClip = isFlexDuration
+        ? { ...clip, duration: leftDuration, originalDuration: leftDuration, trimStart: 0, trimEnd: 0 }
+        : { ...clip, duration: leftDuration, trimEnd: clip.originalDuration - clip.trimStart - leftDuration };
 
       // Right clip: new clip
       const newId = s.clipIdCounter + 1;
-      const rightClip: TimelineClip = {
-        ...clip,
-        id: newId,
-        startTime: currentTime,
-        duration: rightDuration,
-        trimStart: clip.trimStart + leftDuration,
-        trimEnd: clip.trimEnd,
-      };
+      const rightClip: TimelineClip = isFlexDuration
+        ? { ...clip, id: newId, startTime: currentTime, duration: rightDuration, originalDuration: rightDuration, trimStart: 0, trimEnd: 0 }
+        : { ...clip, id: newId, startTime: currentTime, duration: rightDuration, trimStart: clip.trimStart + leftDuration, trimEnd: clip.trimEnd };
 
       return {
         timelineClips: s.timelineClips.map((c) => (c.id === clip.id ? leftClip : c)).concat(rightClip),
@@ -439,6 +471,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   // Ripple edit
   rippleEnabled: false,
   toggleRipple: () => set((s) => ({ rippleEnabled: !s.rippleEnabled })),
+  autoSnapEnabled: true,
+  toggleAutoSnap: () => set((s) => ({ autoSnapEnabled: !s.autoSnapEnabled })),
 
   // Media metadata
   mediaMetadata: {},
@@ -516,12 +550,20 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       const data = result.data;
       const dir = await window.api.getProjectDir(name);
 
-      // Resolve relative media paths to absolute
-      const resolvedMedia = data.mediaFiles.map((mf) => ({
-        ...mf,
-        path: dir + '/' + mf.path,
-        ...(mf.bundlePath ? { bundlePath: dir + '/' + mf.bundlePath } : {}),
-      }));
+      // Resolve relative media paths to absolute and migrate legacy 'component' prop type to 'media'
+      const resolvedMedia = data.mediaFiles.map((mf) => {
+        const resolved = {
+          ...mf,
+          path: dir + '/' + mf.path,
+          ...(mf.bundlePath ? { bundlePath: dir + '/' + mf.bundlePath } : {}),
+        };
+        if (resolved.propDefinitions) {
+          for (const def of Object.values(resolved.propDefinitions)) {
+            if ((def as any).type === 'component') (def as any).type = 'media';
+          }
+        }
+        return resolved;
+      });
       const resolvedClips = data.timelineClips.map((c) => ({
         ...c,
         mediaPath: dir + '/' + c.mediaPath,

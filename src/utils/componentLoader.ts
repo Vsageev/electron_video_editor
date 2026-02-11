@@ -63,7 +63,15 @@ export async function loadComponent(bundlePath: string): Promise<CacheEntry> {
     throw new Error('Component must export default a function component');
   }
 
-  const propDefinitions = mod?.propDefinitions as Record<string, PropDefinition> | undefined;
+  // Normalize propDefinitions: migrate legacy 'component' type to 'media'
+  let propDefinitions = mod?.propDefinitions as Record<string, PropDefinition> | undefined;
+  if (propDefinitions) {
+    for (const def of Object.values(propDefinitions)) {
+      if ((def as any).type === 'component') {
+        (def as any).type = 'media';
+      }
+    }
+  }
 
   const entry: CacheEntry = { Component, propDefinitions };
   cache.set(bundlePath, entry);

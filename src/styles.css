@@ -37,6 +37,7 @@
   --track-height: 56px;
   --ruler-height: 24px;
   --track-header-width: 80px;
+  --timeline-tracks-max-height: calc(var(--track-height) * 5);
 }
 
 * {
@@ -949,6 +950,26 @@ body {
   overflow-y: hidden;
 }
 
+.timeline-tracks-scroll {
+  position: relative;
+  max-height: var(--timeline-tracks-max-height);
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.timeline-tracks-scroll::-webkit-scrollbar {
+  width: 6px;
+}
+
+.timeline-tracks-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.timeline-tracks-scroll::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 3px;
+}
+
 .timeline-container::-webkit-scrollbar {
   height: 6px;
 }
@@ -1168,6 +1189,16 @@ body {
   border-color: var(--blue);
 }
 
+.timeline-clip.image {
+  background: var(--yellow-bg);
+  border: 1px solid rgba(234, 179, 8, 0.25);
+}
+
+.timeline-clip.image:hover,
+.timeline-clip.image.selected {
+  border-color: var(--yellow);
+}
+
 .clip-label {
   font-size: 11px;
   font-weight: 500;
@@ -1217,7 +1248,7 @@ body {
 /* ---- Timeline empty ---- */
 .timeline-empty {
   position: absolute;
-  top: var(--ruler-height);
+  top: 0;
   left: var(--track-header-width);
   right: 0;
   bottom: 0;
@@ -1260,6 +1291,10 @@ body {
   font-size: 12px;
 }
 
+.btn-icon.btn-sm {
+  padding: 0;
+}
+
 .btn-icon {
   width: 28px;
   height: 28px;
@@ -1278,6 +1313,28 @@ body {
 .btn-icon:hover {
   color: var(--text-primary);
   background: var(--bg-card);
+}
+
+/* ---- Tooltips ---- */
+.tooltip {
+  position: fixed;
+  padding: 4px 8px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-primary);
+  background: var(--bg-card);
+  border: 1px solid var(--border-default);
+  border-radius: 6px;
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: 10000;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  animation: tooltip-in 0.15s ease;
+}
+
+@keyframes tooltip-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 
 /* ---- Utility ---- */
@@ -1670,6 +1727,18 @@ body {
   opacity: 0.85;
 }
 
+/* ---- Auto Snap Toggle ---- */
+.btn-snap-active {
+  background: var(--blue);
+  color: #fff;
+}
+
+.btn-snap-active:hover {
+  background: var(--blue);
+  color: #fff;
+  opacity: 0.85;
+}
+
 /* ---- Project Loading ---- */
 
 .project-loading {
@@ -1813,6 +1882,7 @@ body {
 .project-picker-list {
   max-height: 280px;
   overflow-y: auto;
+  overflow-x: hidden;
   display: flex;
   flex-direction: column;
   gap: 2px;

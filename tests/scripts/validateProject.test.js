@@ -133,7 +133,7 @@ describe('validateProject', () => {
 
     it('rejects invalid media type', () => {
       const data = makeValidProject();
-      data.mediaFiles[0].type = 'image';
+      data.mediaFiles[0].type = 'not-real';
       const result = validateProject(data);
       expect(result.structureErrors.length).toBeGreaterThan(0);
     });
@@ -242,6 +242,299 @@ describe('validateProject', () => {
       data.timelineClips[1].duration = 3;
       const result = validateProject(data);
       expect(result.integrityErrors.filter(e => e.includes('overlap'))).toEqual([]);
+    });
+
+    it('rejects component propDefinitions defaults with invalid type', () => {
+      const data = makeValidProject({
+        mediaFiles: [{
+          path: 'media/widget.tsx',
+          name: 'widget.tsx',
+          ext: '.tsx',
+          type: 'component',
+          duration: 5,
+          bundlePath: 'media/widget.component.js',
+          propDefinitions: {
+            count: { type: 'number', default: '5', label: 'Count' },
+          },
+        }],
+        timelineClips: [{
+          id: 1,
+          mediaPath: 'media/widget.tsx',
+          mediaName: 'widget.tsx',
+          track: 1,
+          startTime: 0,
+          duration: 5,
+          trimStart: 0,
+          trimEnd: 0,
+          originalDuration: 5,
+          x: 0,
+          y: 0,
+          scale: 1,
+          scaleX: 1,
+          scaleY: 1,
+        }],
+      });
+      const result = validateProject(data);
+      expect(result.structureErrors).toEqual(
+        expect.arrayContaining([expect.stringMatching(/propDefinitions\.count\.default/i)])
+      );
+    });
+
+    it('detects clip componentProps that do not match propDefinitions types', () => {
+      const data = makeValidProject({
+        mediaFiles: [{
+          path: 'media/widget.tsx',
+          name: 'widget.tsx',
+          ext: '.tsx',
+          type: 'component',
+          duration: 5,
+          bundlePath: 'media/widget.component.js',
+          propDefinitions: {
+            enabled: { type: 'boolean', default: false, label: 'Enabled' },
+            title: { type: 'string', default: 'Hello', label: 'Title' },
+          },
+        }],
+        timelineClips: [{
+          id: 1,
+          mediaPath: 'media/widget.tsx',
+          mediaName: 'widget.tsx',
+          track: 1,
+          startTime: 0,
+          duration: 5,
+          trimStart: 0,
+          trimEnd: 0,
+          originalDuration: 5,
+          x: 0,
+          y: 0,
+          scale: 1,
+          scaleX: 1,
+          scaleY: 1,
+          componentProps: {
+            enabled: 'yes',
+            title: 123,
+          },
+        }],
+      });
+      const result = validateProject(data);
+      expect(result.integrityErrors).toEqual(
+        expect.arrayContaining([
+          expect.stringMatching(/componentProps\.enabled.*expected "boolean"/i),
+          expect.stringMatching(/componentProps\.title.*expected "string"/i),
+        ])
+      );
+    });
+
+    it('detects enum default missing from options', () => {
+      const data = makeValidProject({
+        mediaFiles: [{
+          path: 'media/widget.tsx',
+          name: 'widget.tsx',
+          ext: '.tsx',
+          type: 'component',
+          duration: 5,
+          bundlePath: 'media/widget.component.js',
+          propDefinitions: {
+            variant: {
+              type: 'enum',
+              default: 'c',
+              options: ['a', 'b'],
+              label: 'Variant',
+            },
+          },
+        }],
+        timelineClips: [{
+          id: 1,
+          mediaPath: 'media/widget.tsx',
+          mediaName: 'widget.tsx',
+          track: 1,
+          startTime: 0,
+          duration: 5,
+          trimStart: 0,
+          trimEnd: 0,
+          originalDuration: 5,
+          x: 0,
+          y: 0,
+          scale: 1,
+          scaleX: 1,
+          scaleY: 1,
+        }],
+      });
+      const result = validateProject(data);
+      expect(result.integrityErrors).toEqual(
+        expect.arrayContaining([expect.stringMatching(/default "c".*options/i)])
+      );
+    });
+
+    it('detects enum component prop value outside options', () => {
+      const data = makeValidProject({
+        mediaFiles: [{
+          path: 'media/widget.tsx',
+          name: 'widget.tsx',
+          ext: '.tsx',
+          type: 'component',
+          duration: 5,
+          bundlePath: 'media/widget.component.js',
+          propDefinitions: {
+            variant: {
+              type: 'enum',
+              default: 'a',
+              options: ['a', 'b'],
+              label: 'Variant',
+            },
+          },
+        }],
+        timelineClips: [{
+          id: 1,
+          mediaPath: 'media/widget.tsx',
+          mediaName: 'widget.tsx',
+          track: 1,
+          startTime: 0,
+          duration: 5,
+          trimStart: 0,
+          trimEnd: 0,
+          originalDuration: 5,
+          x: 0,
+          y: 0,
+          scale: 1,
+          scaleX: 1,
+          scaleY: 1,
+          componentProps: {
+            variant: 'c',
+          },
+        }],
+      });
+      const result = validateProject(data);
+      expect(result.integrityErrors).toEqual(
+        expect.arrayContaining([expect.stringMatching(/componentProps\.variant.*one of/i)])
+      );
+    });
+
+    it('accepts media prop default set to empty string', () => {
+      const data = makeValidProject({
+        mediaFiles: [{
+          path: 'media/widget.tsx',
+          name: 'widget.tsx',
+          ext: '.tsx',
+          type: 'component',
+          duration: 5,
+          bundlePath: 'media/widget.component.js',
+          propDefinitions: {
+            child: {
+              type: 'media',
+              default: '',
+              label: 'Child Component',
+            },
+          },
+        }],
+        timelineClips: [{
+          id: 1,
+          mediaPath: 'media/widget.tsx',
+          mediaName: 'widget.tsx',
+          track: 1,
+          startTime: 0,
+          duration: 5,
+          trimStart: 0,
+          trimEnd: 0,
+          originalDuration: 5,
+          x: 0,
+          y: 0,
+          scale: 1,
+          scaleX: 1,
+          scaleY: 1,
+          componentProps: {
+            child: '',
+          },
+        }],
+      });
+      const result = validateProject(data);
+      expect(result.structureErrors).toEqual([]);
+      expect(result.integrityErrors).toEqual([]);
+    });
+
+    it('warns when media prop references missing media path', () => {
+      const data = makeValidProject({
+        mediaFiles: [{
+          path: 'media/widget.tsx',
+          name: 'widget.tsx',
+          ext: '.tsx',
+          type: 'component',
+          duration: 5,
+          bundlePath: 'media/widget.component.js',
+          propDefinitions: {
+            child: {
+              type: 'media',
+              default: '',
+              label: 'Child Component',
+            },
+          },
+        }],
+        timelineClips: [{
+          id: 1,
+          mediaPath: 'media/widget.tsx',
+          mediaName: 'widget.tsx',
+          track: 1,
+          startTime: 0,
+          duration: 5,
+          trimStart: 0,
+          trimEnd: 0,
+          originalDuration: 5,
+          x: 0,
+          y: 0,
+          scale: 1,
+          scaleX: 1,
+          scaleY: 1,
+          componentProps: {
+            child: 'media/missing.tsx',
+          },
+        }],
+      });
+      const result = validateProject(data);
+      expect(result.warnings).toEqual(
+        expect.arrayContaining([expect.stringMatching(/componentProps\.child.*missing media path/i)])
+      );
+    });
+
+    it('detects media prop value with non-string type', () => {
+      const data = makeValidProject({
+        mediaFiles: [{
+          path: 'media/widget.tsx',
+          name: 'widget.tsx',
+          ext: '.tsx',
+          type: 'component',
+          duration: 5,
+          bundlePath: 'media/widget.component.js',
+          propDefinitions: {
+            child: {
+              type: 'media',
+              default: '',
+              label: 'Child Component',
+            },
+          },
+        }],
+        timelineClips: [{
+          id: 1,
+          mediaPath: 'media/widget.tsx',
+          mediaName: 'widget.tsx',
+          track: 1,
+          startTime: 0,
+          duration: 5,
+          trimStart: 0,
+          trimEnd: 0,
+          originalDuration: 5,
+          x: 0,
+          y: 0,
+          scale: 1,
+          scaleX: 1,
+          scaleY: 1,
+          componentProps: {
+            child: 123,
+          },
+        }],
+      });
+      const result = validateProject(data);
+      expect(result.integrityErrors).toEqual(
+        expect.arrayContaining([expect.stringMatching(/componentProps\.child.*expected "media"/i)])
+      );
     });
   });
 

@@ -1,8 +1,9 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import { useEditorStore } from '../store/editorStore';
-import { isVideoExt, isAudioExt, isComponentExt, getMediaDuration, formatTime } from '../utils/formatTime';
+import { isVideoExt, isAudioExt, isComponentExt, isImageExt, getMediaDuration, formatTime } from '../utils/formatTime';
 import { loadComponent } from '../utils/componentLoader';
 import ContextMenu from './ContextMenu';
+import Tooltip from './Tooltip';
 import type { MediaFile, ContextMenuItem } from '../types';
 
 const METADATA_HINTS: Record<string, string> = {
@@ -48,6 +49,16 @@ What this component renders.
 
 ## Tags
 #component #overlay`,
+  image: `# Image Notes
+
+## Description
+What this image depicts.
+
+## Usage
+Where this image is used in the project.
+
+## Tags
+#image #still`,
 };
 
 export default function MediaSidebar() {
@@ -137,7 +148,9 @@ export default function MediaSidebar() {
           ? 'video'
           : isAudioExt(file.ext)
             ? 'audio'
-            : null;
+            : isImageExt(file.ext)
+              ? 'image'
+              : null;
 
       if (!type) {
         setImportError(`Unsupported file type: ${file.name}`);
@@ -172,7 +185,7 @@ export default function MediaSidebar() {
         bundlePath = projectDir + '/' + bundleResult.bundlePath;
       }
 
-      const duration = type === 'component'
+      const duration = (type === 'component' || type === 'image')
         ? 5
         : await getMediaDuration(file.path, type);
 
@@ -273,16 +286,17 @@ export default function MediaSidebar() {
         <div className="sidebar-header-actions">
           {builtinComponents.length > 0 && (
             <div className="builtin-dropdown-wrapper">
-              <button
-                className="btn-icon"
-                onClick={(e) => { e.stopPropagation(); setShowBuiltins((v) => !v); }}
-                title="Add built-in component"
-              >
-                <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-                  <path d="M5 3L2 8l3 5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
-                  <path d="M11 3l3 5-3 5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
-                </svg>
-              </button>
+              <Tooltip label="Add built-in component">
+                <button
+                  className="btn-icon"
+                  onClick={(e) => { e.stopPropagation(); setShowBuiltins((v) => !v); }}
+                >
+                  <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                    <path d="M5 3L2 8l3 5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+                    <path d="M11 3l3 5-3 5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                </button>
+              </Tooltip>
               {showBuiltins && (
                 <div className="builtin-dropdown">
                   {builtinComponents.map((b) => (
@@ -298,11 +312,13 @@ export default function MediaSidebar() {
               )}
             </div>
           )}
-          <button className="btn-icon" onClick={handleImport} title="Import media">
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-              <path d="M8 3v10M3 8h10" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-            </svg>
-          </button>
+          <Tooltip label="Import media">
+            <button className="btn-icon" onClick={handleImport}>
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                <path d="M8 3v10M3 8h10" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+              </svg>
+            </button>
+          </Tooltip>
         </div>
       </div>
       {importError && (
@@ -336,7 +352,7 @@ export default function MediaSidebar() {
               onDoubleClick={() => handleDoubleClick(media)}
               onContextMenu={(e) => handleContextMenu(e, media, idx)}
             >
-              <div className={`media-item-icon${media.type === 'audio' ? ' audio' : media.type === 'component' ? ' component' : ''}`}>
+              <div className={`media-item-icon${media.type === 'audio' ? ' audio' : media.type === 'component' ? ' component' : media.type === 'image' ? ' image' : ''}`}>
                 {media.type === 'video' ? (
                   <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
                     <rect x="2" y="4" width="12" height="8" rx="1.5" stroke="currentColor" strokeWidth="1.2" />
@@ -347,6 +363,12 @@ export default function MediaSidebar() {
                     <path d="M5 3L2 8l3 5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
                     <path d="M11 3l3 5-3 5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
                     <path d="M9 2L7 14" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+                  </svg>
+                ) : media.type === 'image' ? (
+                  <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                    <rect x="2" y="3" width="12" height="10" rx="1.5" stroke="currentColor" strokeWidth="1.2" />
+                    <circle cx="5.5" cy="6.5" r="1.5" fill="currentColor" opacity="0.6" />
+                    <path d="M2 11l3-3 2 2 3-4 4 5H2z" fill="currentColor" opacity="0.4" />
                   </svg>
                 ) : (
                   <svg width="16" height="16" viewBox="0 0 16 16" fill="none">

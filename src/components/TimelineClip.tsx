@@ -9,10 +9,32 @@ interface TimelineClipProps {
   isSelected: boolean;
 }
 
+const SNAP_THRESHOLD_PX = 10;
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
+}
+
+function findSnapTarget(raw: number, candidates: number[], threshold: number): number | null {
+  let bestTarget: number | null = null;
+  let bestDiff = Infinity;
+  for (const candidate of candidates) {
+    const diff = Math.abs(candidate - raw);
+    if (diff < bestDiff) {
+      bestDiff = diff;
+      bestTarget = candidate;
+    }
+  }
+  return bestDiff <= threshold ? bestTarget : null;
+}
+
 export default memo(function TimelineClip({ clip, zoom, isSelected }: TimelineClipProps) {
   const { selectClip, removeClip, updateClip } = useEditorStore();
   const tracks = useEditorStore((s) => s.tracks);
   const mediaFiles = useEditorStore((s) => s.mediaFiles);
+  const timelineClips = useEditorStore((s) => s.timelineClips);
+  const currentTime = useEditorStore((s) => s.currentTime);
+  const autoSnapEnabled = useEditorStore((s) => s.autoSnapEnabled);
   const mediaType = mediaFiles.find((m) => m.path === clip.mediaPath)?.type ?? 'video';
 
   const [contextMenu, setContextMenu] = useState<{
@@ -31,6 +53,8 @@ export default memo(function TimelineClip({ clip, zoom, isSelected }: TimelineCl
       const startY = e.clientY;
       const origStart = clip.startTime;
       const origTrack = clip.track;
+      const clipDuration = clip.duration;
+      const snapThreshold = SNAP_THRESHOLD_PX / zoom;
 
       // Find all track-content elements for cross-track detection
       const trackHeight = parseInt(getComputedStyle(document.documentElement).getPropertyValue('--track-height')) || 56;
@@ -39,15 +63,45 @@ export default memo(function TimelineClip({ clip, zoom, isSelected }: TimelineCl
         const dx = ev.clientX - startX;
         const dy = ev.clientY - startY;
         const dt = dx / zoom;
-        const updates: Partial<TimelineClipType> = { startTime: Math.max(0, origStart + dt) };
+        let nextStart = Math.max(0, origStart + dt);
 
         // Determine track change based on vertical offset
         const currentTracks = useEditorStore.getState().tracks;
         const origIdx = currentTracks.indexOf(origTrack);
         const trackOffset = Math.round(dy / trackHeight);
         const newIdx = Math.max(0, Math.min(currentTracks.length - 1, origIdx + trackOffset));
+        const targetTrack = currentTracks[newIdx] ?? origTrack;
+
+        if (autoSnapEnabled) {
+          const edges = timelineClips
+            .filter((c) => c.id !== clip.id && c.track === targetTrack)
+            .flatMap((c) => [c.startTime, c.startTime + c.duration]);
+          const candidates = [0, currentTime, ...edges];
+          const startSnap = findSnapTarget(nextStart, candidates, snapThreshold);
+          const endSnap = findSnapTarget(nextStart + clipDuration, candidates, snapThreshold);
+          const startFromEndSnap = endSnap == null ? null : endSnap - clipDuration;
+          const snapOptions = [
+            ...(startSnap == null ? [] : [startSnap]),
+            ...(startFromEndSnap == null ? [] : [startFromEndSnap]),
+          ].map((value) => Math.max(0, value));
+
+          if (snapOptions.length > 0) {
+            let best = snapOptions[0];
+            let bestDiff = Math.abs(best - nextStart);
+            for (const option of snapOptions) {
+              const diff = Math.abs(option - nextStart);
+              if (diff < bestDiff) {
+                bestDiff = diff;
+                best = option;
+              }
+            }
+            nextStart = best;
+          }
+        }
+
+        const updates: Partial<TimelineClipType> = { startTime: nextStart };
         if (currentTracks[newIdx] !== undefined) {
-          updates.track = currentTracks[newIdx];
+          updates.track = targetTrack;
         }
 
         updateClip(clip.id, updates);
@@ -61,7 +115,7 @@ export default memo(function TimelineClip({ clip, zoom, isSelected }: TimelineCl
       document.addEventListener('mousemove', onMove);
       document.addEventListener('mouseup', onUp);
     },
-    [clip.id, clip.startTime, clip.track, zoom, selectClip, updateClip]
+    [clip.id, clip.startTime, clip.track, clip.duration, zoom, selectClip, updateClip, autoSnapEnabled, timelineClips, currentTime]
   );
 
   const handleTrim = useCallback(
@@ -71,26 +125,99 @@ export default memo(function TimelineClip({ clip, zoom, isSelected }: TimelineCl
 
       const startX = e.clientX;
       const origStart = clip.startTime;
+      const origDuration = clip.duration;
       const origTrimStart = clip.trimStart;
       const origTrimEnd = clip.trimEnd;
+      const snapThreshold = SNAP_THRESHOLD_PX / zoom;
+      const snapCandidates = autoSnapEnabled
+        ? [
+            0,
+            currentTime,
+            ...timelineClips
+              .filter((c) => c.id !== clip.id)
+              .flatMap((c) => [c.startTime, c.startTime + c.duration]),
+          ]
+        : [];
+
+      // Components and images have no fixed source duration — allow free resize
+      const isFlexDuration = mediaType === 'component' || mediaType === 'image';
 
       const onMove = (ev: MouseEvent) => {
         const dx = ev.clientX - startX;
         const dt = dx / zoom;
 
         if (side === 'left') {
-          const newTrimStart = Math.max(0, origTrimStart + dt);
-          const maxTrim = clip.originalDuration - clip.trimEnd - 0.1;
-          const trimStart = Math.min(newTrimStart, maxTrim);
-          const duration = clip.originalDuration - trimStart - clip.trimEnd;
-          const startTime = origStart + (trimStart - origTrimStart);
-          updateClip(clip.id, { trimStart, duration, startTime });
+          if (isFlexDuration) {
+            // Flex: move startTime, shrink/grow duration, no trimStart concept needed
+            const origEnd = origStart + origDuration;
+            let startTime = origStart + dt;
+            let duration = origDuration - dt;
+            if (duration < 0.1) {
+              duration = 0.1;
+              startTime = origEnd - 0.1;
+            }
+            if (startTime < 0) {
+              duration = duration + startTime;
+              startTime = 0;
+              if (duration < 0.1) duration = 0.1;
+            }
+            if (autoSnapEnabled) {
+              const snapped = findSnapTarget(startTime, snapCandidates, snapThreshold);
+              if (snapped != null) {
+                const clamped = Math.max(0, snapped);
+                duration = origEnd - clamped;
+                startTime = clamped;
+                if (duration < 0.1) { duration = 0.1; startTime = origEnd - 0.1; }
+              }
+            }
+            updateClip(clip.id, { startTime, duration, originalDuration: duration });
+          } else {
+            const newTrimStart = Math.max(0, origTrimStart + dt);
+            const maxTrim = clip.originalDuration - clip.trimEnd - 0.1;
+            let trimStart = Math.min(newTrimStart, maxTrim);
+            let startTime = origStart + (trimStart - origTrimStart);
+            if (autoSnapEnabled) {
+              const minStart = origStart - origTrimStart;
+              const maxStart = origStart + (maxTrim - origTrimStart);
+              const snapped = findSnapTarget(startTime, snapCandidates, snapThreshold);
+              if (snapped != null) {
+                startTime = clamp(snapped, minStart, maxStart);
+                trimStart = origTrimStart + (startTime - origStart);
+              }
+            }
+            const duration = clip.originalDuration - trimStart - clip.trimEnd;
+            updateClip(clip.id, { trimStart, duration, startTime });
+          }
         } else {
-          const newTrimEnd = Math.max(0, origTrimEnd - dt);
-          const maxTrim = clip.originalDuration - clip.trimStart - 0.1;
-          const trimEnd = Math.min(newTrimEnd, maxTrim);
-          const duration = clip.originalDuration - clip.trimStart - trimEnd;
-          updateClip(clip.id, { trimEnd, duration });
+          if (isFlexDuration) {
+            // Flex: freely adjust duration with no upper bound
+            let duration = Math.max(0.1, origDuration + dt);
+            if (autoSnapEnabled) {
+              const rawEnd = origStart + duration;
+              const snapped = findSnapTarget(rawEnd, snapCandidates, snapThreshold);
+              if (snapped != null) {
+                duration = Math.max(0.1, snapped - origStart);
+              }
+            }
+            updateClip(clip.id, { duration, originalDuration: duration });
+          } else {
+            const newTrimEnd = Math.max(0, origTrimEnd - dt);
+            const maxTrim = clip.originalDuration - clip.trimStart - 0.1;
+            let trimEnd = Math.min(newTrimEnd, maxTrim);
+            let duration = clip.originalDuration - clip.trimStart - trimEnd;
+            if (autoSnapEnabled) {
+              const rawEnd = origStart + duration;
+              const minEnd = origStart + 0.1;
+              const maxEnd = origStart + clip.originalDuration - clip.trimStart;
+              const snapped = findSnapTarget(rawEnd, snapCandidates, snapThreshold);
+              if (snapped != null) {
+                const endTime = clamp(snapped, minEnd, maxEnd);
+                duration = endTime - origStart;
+                trimEnd = clip.originalDuration - clip.trimStart - duration;
+              }
+            }
+            updateClip(clip.id, { trimEnd, duration });
+          }
         }
       };
 
@@ -102,7 +229,7 @@ export default memo(function TimelineClip({ clip, zoom, isSelected }: TimelineCl
       document.addEventListener('mousemove', onMove);
       document.addEventListener('mouseup', onUp);
     },
-    [clip, zoom, selectClip, updateClip]
+    [clip, zoom, selectClip, updateClip, autoSnapEnabled, timelineClips, currentTime]
   );
 
   const handleContextMenu = useCallback(

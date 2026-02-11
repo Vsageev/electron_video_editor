@@ -24,20 +24,59 @@ export interface Keyframe {
 
 export type KeyframeMap = Partial<Record<AnimatableProp, Keyframe[]>>;
 
-export interface PropDefinition {
-  type: 'string' | 'number' | 'color' | 'boolean';
-  default: any;
+export interface StringPropDefinition {
+  type: 'string';
+  default: string;
+  label: string;
+}
+
+export interface NumberPropDefinition {
+  type: 'number';
+  default: number;
   label: string;
   min?: number;
   max?: number;
   step?: number;
 }
 
+export interface ColorPropDefinition {
+  type: 'color';
+  default: string;
+  label: string;
+}
+
+export interface BooleanPropDefinition {
+  type: 'boolean';
+  default: boolean;
+  label: string;
+}
+
+export interface EnumPropDefinition {
+  type: 'enum';
+  default: string;
+  label: string;
+  options: string[];
+}
+
+export interface MediaRefPropDefinition {
+  type: 'media';
+  default: string;
+  label: string;
+}
+
+export type PropDefinition =
+  | StringPropDefinition
+  | NumberPropDefinition
+  | ColorPropDefinition
+  | BooleanPropDefinition
+  | EnumPropDefinition
+  | MediaRefPropDefinition;
+
 export interface MediaFile {
   path: string;
   name: string;
   ext: string;
-  type: 'video' | 'audio' | 'component';
+  type: 'video' | 'audio' | 'component' | 'image';
   duration: number;
   bundlePath?: string;
   propDefinitions?: Record<string, PropDefinition>;

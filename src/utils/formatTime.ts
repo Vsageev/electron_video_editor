@@ -26,6 +26,10 @@ export function isComponentExt(ext: string): boolean {
   return ['.tsx', '.jsx'].includes(ext);
 }
 
+export function isImageExt(ext: string): boolean {
+  return ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg'].includes(ext);
+}
+
 async function getMediaDurationFromElement(
   filePath: string,
   type: string,

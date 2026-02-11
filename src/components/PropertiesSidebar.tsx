@@ -59,7 +59,7 @@ function KeyframeButton({
       title={
         existingAtTime
           ? 'Remove keyframe'
-          : 'Add keyframe at current time'
+          : 'Add keyframe'
       }
     >
       <span className="keyframe-diamond" />
@@ -75,6 +75,10 @@ export default function PropertiesSidebar() {
   const removeKeyframe = useEditorStore((s) => s.removeKeyframe);
   const clip = timelineClips.find((c) => c.id === selectedClipId);
   const clipMedia = clip ? mediaFiles.find((m) => m.path === clip.mediaPath) : undefined;
+  const mediaRefOptions = useMemo(
+    () => mediaFiles.filter((m) => m.path !== clip?.mediaPath),
+    [mediaFiles, clip?.mediaPath],
+  );
 
   const clipLocalTime = clip ? currentTime - clip.startTime : 0;
 
@@ -102,6 +106,9 @@ export default function PropertiesSidebar() {
 
       if (prop === 'startTime') {
         updateClip(clip.id, { startTime: Math.max(0, val) });
+      } else if (prop === 'duration') {
+        const duration = Math.max(0.1, val);
+        updateClip(clip.id, { duration, originalDuration: duration });
       } else if (prop === 'trimStart') {
         const trimStart = Math.max(0, Math.min(val, clip.originalDuration - clip.trimEnd - 0.1));
         const duration = clip.originalDuration - trimStart - clip.trimEnd;
@@ -305,42 +312,130 @@ export default function PropertiesSidebar() {
                 <div className="property-group-title">Component Props</div>
                 {Object.entries(clipMedia.propDefinitions).map(([key, def]) => {
                   const value = clip!.componentProps?.[key] ?? def.default;
+                  const enumValue = def.type === 'enum' && def.options.includes(String(value))
+                    ? String(value)
+                    : def.type === 'enum'
+                      ? def.default
+                      : '';
+                  const mediaValue = def.type === 'media' && mediaRefOptions.some((m) => m.path === String(value))
+                    ? String(value)
+                    : def.type === 'media'
+                      ? ''
+                      : '';
+                  const selectedRefMedia = def.type === 'media' && mediaValue
+                    ? mediaFiles.find((m) => m.path === mediaValue)
+                    : undefined;
+                  const childPropDefs = selectedRefMedia?.type === 'component' && selectedRefMedia.propDefinitions
+                    ? selectedRefMedia.propDefinitions
+                    : undefined;
+                  const childPropsKey = `${key}:props`;
+                  const childProps = clip!.componentProps?.[childPropsKey] as Record<string, any> | undefined;
+
                   return (
-                    <div className="property-row" key={key}>
-                      <span className="property-label">{def.label}</span>
-                      {def.type === 'string' && (
-                        <input
-                          className="property-input"
-                          type="text"
-                          value={value}
-                          onChange={(e) => handleComponentPropChange(key, e.target.value)}
-                        />
-                      )}
-                      {def.type === 'number' && (
-                        <input
-                          className="property-input"
-                          type="number"
-                          step={def.step ?? 1}
-                          min={def.min}
-                          max={def.max}
-                          value={value}
-                          onChange={(e) => handleComponentPropChange(key, parseFloat(e.target.value) || 0)}
-                        />
-                      )}
-                      {def.type === 'color' && (
-                        <input
-                          type="color"
-                          value={value}
-                          onChange={(e) => handleComponentPropChange(key, e.target.value)}
-                          style={{ width: 48, height: 24, border: 'none', background: 'transparent', cursor: 'pointer' }}
-                        />
-                      )}
-                      {def.type === 'boolean' && (
-                        <input
-                          type="checkbox"
-                          checked={!!value}
-                          onChange={(e) => handleComponentPropChange(key, e.target.checked)}
-                        />
+                    <div key={key}>
+                      <div className="property-row">
+                        <span className="property-label">{def.label}</span>
+                        {def.type === 'string' && (
+                          <input
+                            className="property-input"
+                            type="text"
+                            value={value}
+                            onChange={(e) => handleComponentPropChange(key, e.target.value)}
+                          />
+                        )}
+                        {def.type === 'number' && (
+                          <input
+                            className="property-input"
+                            type="number"
+                            step={def.step ?? 1}
+                            min={def.min}
+                            max={def.max}
+                            value={value}
+                            onChange={(e) => handleComponentPropChange(key, parseFloat(e.target.value) || 0)}
+                          />
+                        )}
+                        {def.type === 'color' && (
+                          <input
+                            type="color"
+                            value={value}
+                            onChange={(e) => handleComponentPropChange(key, e.target.value)}
+                            style={{ width: 48, height: 24, border: 'none', background: 'transparent', cursor: 'pointer' }}
+                          />
+                        )}
+                        {def.type === 'boolean' && (
+                          <input
+                            type="checkbox"
+                            checked={!!value}
+                            onChange={(e) => handleComponentPropChange(key, e.target.checked)}
+                          />
+                        )}
+                        {def.type === 'enum' && (
+                          <select
+                            className="property-input"
+                            value={enumValue}
+                            onChange={(e) => handleComponentPropChange(key, e.target.value)}
+                          >
+                            {def.options.map((option) => (
+                              <option key={option} value={option}>
+                                {option}
+                              </option>
+                            ))}
+                          </select>
+                        )}
+                        {def.type === 'media' && (
+                          <select
+                            className="property-input"
+                            value={mediaValue}
+                            onChange={(e) => handleComponentPropChange(key, e.target.value)}
+                          >
+                            <option value="">None</option>
+                            {mediaRefOptions.map((media) => (
+                              <option key={media.path} value={media.path}>
+                                {media.name} ({media.type})
+                              </option>
+                            ))}
+                          </select>
+                        )}
+                      </div>
+                      {def.type === 'media' && childPropDefs && Object.keys(childPropDefs).length > 0 && (
+                        <div className="property-group" style={{ marginLeft: 12, borderLeft: '2px solid var(--border-color, #444)', paddingLeft: 8 }}>
+                          <div className="property-group-title" style={{ fontSize: 11 }}>{selectedRefMedia!.name} Props</div>
+                          {Object.entries(childPropDefs).map(([childKey, childDef]) => {
+                            if (childDef.type === 'media') return null; // no recursive nesting
+                            const childVal = childProps?.[childKey] ?? childDef.default;
+                            const childEnumValue = childDef.type === 'enum' && childDef.options.includes(String(childVal))
+                              ? String(childVal) : childDef.type === 'enum' ? childDef.default : '';
+                            return (
+                              <div className="property-row" key={childKey}>
+                                <span className="property-label">{childDef.label}</span>
+                                {childDef.type === 'string' && (
+                                  <input className="property-input" type="text" value={childVal}
+                                    onChange={(e) => handleComponentPropChange(childPropsKey, { ...(childProps || {}), [childKey]: e.target.value })} />
+                                )}
+                                {childDef.type === 'number' && (
+                                  <input className="property-input" type="number"
+                                    step={childDef.step ?? 1} min={childDef.min} max={childDef.max} value={childVal}
+                                    onChange={(e) => handleComponentPropChange(childPropsKey, { ...(childProps || {}), [childKey]: parseFloat(e.target.value) || 0 })} />
+                                )}
+                                {childDef.type === 'color' && (
+                                  <input type="color" value={childVal}
+                                    onChange={(e) => handleComponentPropChange(childPropsKey, { ...(childProps || {}), [childKey]: e.target.value })}
+                                    style={{ width: 48, height: 24, border: 'none', background: 'transparent', cursor: 'pointer' }} />
+                                )}
+                                {childDef.type === 'boolean' && (
+                                  <input type="checkbox" checked={!!childVal}
+                                    onChange={(e) => handleComponentPropChange(childPropsKey, { ...(childProps || {}), [childKey]: e.target.checked })} />
+                                )}
+                                {childDef.type === 'enum' && (
+                                  <select className="property-input" value={childEnumValue}
+                                    onChange={(e) => handleComponentPropChange(childPropsKey, { ...(childProps || {}), [childKey]: e.target.value })}>
+                                    {childDef.options.map((opt) => (<option key={opt} value={opt}>{opt}</option>))}
+                                  </select>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
                       )}
                     </div>
                   );
@@ -363,18 +458,31 @@ export default function PropertiesSidebar() {
               </div>
               <div className="property-row">
                 <span className="property-label">Duration</span>
-                <span className="property-value">{formatTime(clip.duration)}</span>
+                {clipMedia?.type === 'component' || clipMedia?.type === 'image' ? (
+                  <input
+                    className="property-input"
+                    type="number"
+                    step="0.1"
+                    min="0.1"
+                    value={clip.duration.toFixed(2)}
+                    onChange={(e) => handleChange('duration', e.target.value)}
+                  />
+                ) : (
+                  <span className="property-value">{formatTime(clip.duration)}</span>
+                )}
               </div>
-              <div className="property-row">
-                <span className="property-label">Original</span>
-                <span className="property-value">{formatTime(clip.originalDuration)}</span>
-              </div>
+              {clipMedia?.type !== 'component' && clipMedia?.type !== 'image' && (
+                <div className="property-row">
+                  <span className="property-label">Original</span>
+                  <span className="property-value">{formatTime(clip.originalDuration)}</span>
+                </div>
+              )}
             </div>
 
             <div className="property-group">
                   <div className="property-group-title">
                     Transform
-                    <button className="property-reset-btn" onClick={handleAddAllKeyframes} title="Add keyframe for all properties at current time">
+                    <button className="property-reset-btn" onClick={handleAddAllKeyframes} title="Key all properties">
                       Key All
                     </button>
                     <button className="property-reset-btn" onClick={handleResetTransform} title="Reset transform">
@@ -524,31 +632,33 @@ export default function PropertiesSidebar() {
                   </div>
                 )}
 
-            <div className="property-group">
-              <div className="property-group-title">Trim</div>
-              <div className="property-row">
-                <span className="property-label">Trim Start</span>
-                <input
-                  className="property-input"
-                  type="number"
-                  step="0.1"
-                  min="0"
-                  value={clip.trimStart.toFixed(2)}
-                  onChange={(e) => handleChange('trimStart', e.target.value)}
-                />
+            {clipMedia?.type !== 'component' && clipMedia?.type !== 'image' && (
+              <div className="property-group">
+                <div className="property-group-title">Trim</div>
+                <div className="property-row">
+                  <span className="property-label">Trim Start</span>
+                  <input
+                    className="property-input"
+                    type="number"
+                    step="0.1"
+                    min="0"
+                    value={clip.trimStart.toFixed(2)}
+                    onChange={(e) => handleChange('trimStart', e.target.value)}
+                  />
+                </div>
+                <div className="property-row">
+                  <span className="property-label">Trim End</span>
+                  <input
+                    className="property-input"
+                    type="number"
+                    step="0.1"
+                    min="0"
+                    value={clip.trimEnd.toFixed(2)}
+                    onChange={(e) => handleChange('trimEnd', e.target.value)}
+                  />
+                </div>
               </div>
-              <div className="property-row">
-                <span className="property-label">Trim End</span>
-                <input
-                  className="property-input"
-                  type="number"
-                  step="0.1"
-                  min="0"
-                  value={clip.trimEnd.toFixed(2)}
-                  onChange={(e) => handleChange('trimEnd', e.target.value)}
-                />
-              </div>
-            </div>
+            )}
           </>
         )}
       </div>

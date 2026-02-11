@@ -77,7 +77,7 @@ export default function ProjectPicker({ onClose }: Props) {
           </svg>
           <div className="project-picker-title">Projects</div>
           {currentProject && (
-            <button className="project-picker-close" onClick={onClose}>
+            <button className="project-picker-close" onClick={onClose} title="Close" aria-label="Close project picker">
               <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
                 <path d="M3 3l8 8M11 3l-8 8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
               </svg>
