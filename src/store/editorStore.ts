@@ -10,6 +10,84 @@ function toProjectRelativePath(filePath: string, projectDir: string | null): str
   return fp.startsWith(dir + '/') ? fp.slice(dir.length + 1) : null;
 }
 
+function isAbsolutePath(filePath: string): boolean {
+  if (!filePath) return false;
+  return (
+    filePath.startsWith('/') ||
+    filePath.startsWith('\\\\') ||
+    /^[A-Za-z]:[\\/]/.test(filePath)
+  );
+}
+
+function toProjectAbsolutePath(filePath: string, projectDir: string | null): string {
+  if (!filePath || !projectDir || isAbsolutePath(filePath)) return filePath;
+  return `${projectDir}/${filePath}`;
+}
+
+function buildMediaLookup(
+  mediaFiles: MediaFile[],
+  projectDir: string | null,
+): Map<string, MediaFile> {
+  const map = new Map<string, MediaFile>();
+  for (const media of mediaFiles) {
+    map.set(media.path, media);
+    const rel = toProjectRelativePath(media.path, projectDir);
+    if (rel) map.set(rel, media);
+    const abs = toProjectAbsolutePath(media.path, projectDir);
+    map.set(abs, media);
+  }
+  return map;
+}
+
+function remapComponentMediaRefs(
+  componentProps: Record<string, any> | undefined,
+  propDefinitions: Record<string, PropDefinition> | undefined,
+  mediaLookup: Map<string, MediaFile>,
+  mapPath: (value: string) => string,
+  depth = 0,
+): Record<string, any> | undefined {
+  if (!componentProps || !propDefinitions || depth > 8) return componentProps;
+  let changed = false;
+  const nextProps: Record<string, any> = { ...componentProps };
+
+  for (const [propName, def] of Object.entries(propDefinitions)) {
+    if (def.type !== 'media') continue;
+
+    const rawValue = nextProps[propName];
+    let selectedValue = rawValue;
+    if (typeof rawValue === 'string' && rawValue !== '') {
+      const mappedValue = mapPath(rawValue);
+      if (mappedValue !== rawValue) {
+        nextProps[propName] = mappedValue;
+        changed = true;
+      }
+      selectedValue = mappedValue;
+    }
+
+    const childPropsKey = `${propName}:props`;
+    const childPropsRaw = nextProps[childPropsKey];
+    if (!childPropsRaw || typeof childPropsRaw !== 'object' || Array.isArray(childPropsRaw)) continue;
+    if (typeof selectedValue !== 'string' || selectedValue === '') continue;
+
+    const selectedMedia = mediaLookup.get(selectedValue);
+    if (!selectedMedia || selectedMedia.type !== 'component' || !selectedMedia.propDefinitions) continue;
+
+    const mappedChildProps = remapComponentMediaRefs(
+      childPropsRaw as Record<string, any>,
+      selectedMedia.propDefinitions,
+      mediaLookup,
+      mapPath,
+      depth + 1,
+    );
+    if (mappedChildProps !== childPropsRaw) {
+      nextProps[childPropsKey] = mappedChildProps;
+      changed = true;
+    }
+  }
+
+  return changed ? nextProps : componentProps;
+}
+
 function buildDefaultComponentProps(
   propDefinitions?: Record<string, PropDefinition>,
 ): Record<string, any> | undefined {
@@ -56,13 +134,14 @@ interface EditorState {
 
   // Timeline clips
   timelineClips: TimelineClip[];
-  selectedClipId: number | null;
+  selectedClipIds: number[];
   clipIdCounter: number;
   addClip: (media: MediaFile) => void;
   addClipAtTime: (media: MediaFile, track: number, startTime: number) => void;
   removeClip: (clipId: number) => void;
+  removeSelectedClips: () => void;
   updateClip: (clipId: number, updates: Partial<TimelineClip>) => void;
-  selectClip: (clipId: number | null) => void;
+  selectClip: (clipId: number | null, opts?: { toggle?: boolean }) => void;
 
   // Keyframes
   addKeyframe: (clipId: number, prop: AnimatableProp, time: number, value: number, easing: EasingType) => void;
@@ -78,9 +157,17 @@ interface EditorState {
   setCurrentTime: (time: number) => void;
   setDuration: (duration: number) => void;
 
-  // Zoom
+  // Zoom (timeline)
   zoom: number;
   setZoom: (zoom: number) => void;
+
+  // Canvas zoom/pan (preview panel)
+  canvasZoom: number;
+  canvasPanX: number;
+  canvasPanY: number;
+  setCanvasZoom: (zoom: number) => void;
+  setCanvasPan: (x: number, y: number) => void;
+  resetCanvasView: () => void;
 
   // Export
   isExporting: boolean;
@@ -161,10 +248,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         }
         return changed ? { ...clip, componentProps: nextProps } : clip;
       });
-    const selectedClipId =
-      s.selectedClipId != null && !remainingClips.some((c) => c.id === s.selectedClipId)
-        ? null
-        : s.selectedClipId;
+    const remainingIds = new Set(remainingClips.map((c) => c.id));
+    const selectedClipIds = s.selectedClipIds.filter((id) => remainingIds.has(id));
 
     const nextSelectedMediaIndex =
       s.selectedMediaIndex == null
@@ -188,7 +273,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       mediaFiles: s.mediaFiles.filter((_, i) => i !== index),
       selectedMediaIndex: nextSelectedMediaIndex,
       timelineClips: remainingClips,
-      selectedClipId,
+      selectedClipIds,
       previewMediaPath: nextPreviewMediaPath,
       previewMediaType: nextPreviewMediaType,
       mediaMetadata: nextMediaMetadata,
@@ -232,7 +317,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
 
   // Timeline clips
   timelineClips: [],
-  selectedClipId: null,
+  selectedClipIds: [],
   clipIdCounter: 0,
   addClip: (media) =>
     set((s) => {
@@ -266,12 +351,13 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         scale: 1,
         scaleX: 1,
         scaleY: 1,
+        rotation: 0,
         ...(componentProps ? { componentProps } : {}),
       };
       return {
         timelineClips: [...s.timelineClips, clip],
         clipIdCounter: newId,
-        selectedClipId: newId,
+        selectedClipIds: [newId],
       };
     }),
   addClipAtTime: (media, track, startTime) =>
@@ -297,12 +383,13 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         scale: 1,
         scaleX: 1,
         scaleY: 1,
+        rotation: 0,
         ...(componentProps ? { componentProps } : {}),
       };
       return {
         timelineClips: [...s.timelineClips, clip],
         clipIdCounter: newId,
-        selectedClipId: newId,
+        selectedClipIds: [newId],
       };
     }),
   removeClip: (clipId) =>
@@ -319,8 +406,27 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       }
       return {
         timelineClips: remaining,
-        selectedClipId: s.selectedClipId === clipId ? null : s.selectedClipId,
+        selectedClipIds: s.selectedClipIds.filter((id) => id !== clipId),
       };
+    }),
+  removeSelectedClips: () =>
+    set((s) => {
+      if (s.selectedClipIds.length === 0) return s;
+      const idsToRemove = new Set(s.selectedClipIds);
+      let remaining = s.timelineClips.filter((c) => !idsToRemove.has(c.id));
+      if (s.rippleEnabled) {
+        for (const clipId of idsToRemove) {
+          const removed = s.timelineClips.find((c) => c.id === clipId);
+          if (removed) {
+            remaining = remaining.map((c) =>
+              c.track === removed.track && c.startTime > removed.startTime
+                ? { ...c, startTime: c.startTime - removed.duration }
+                : c,
+            );
+          }
+        }
+      }
+      return { timelineClips: remaining, selectedClipIds: [] };
     }),
   updateClip: (clipId, updates) =>
     set((s) => {
@@ -342,7 +448,17 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         timelineClips: s.timelineClips.map((c) => (c.id === clipId ? nextClip : c)),
       };
     }),
-  selectClip: (clipId) => set({ selectedClipId: clipId }),
+  selectClip: (clipId, opts) => set((s) => {
+    if (clipId === null) return { selectedClipIds: [] };
+    if (opts?.toggle) {
+      const idx = s.selectedClipIds.indexOf(clipId);
+      if (idx >= 0) {
+        return { selectedClipIds: s.selectedClipIds.filter((id) => id !== clipId) };
+      }
+      return { selectedClipIds: [...s.selectedClipIds, clipId] };
+    }
+    return { selectedClipIds: [clipId] };
+  }),
 
   // Keyframes
   addKeyframe: (clipId, prop, time, value, easing) =>
@@ -416,9 +532,17 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   setCurrentTime: (time) => set({ currentTime: time }),
   setDuration: (duration) => set({ duration }),
 
-  // Zoom
+  // Zoom (timeline)
   zoom: 100,
   setZoom: (zoom) => set({ zoom: Math.max(20, Math.min(300, zoom)) }),
+
+  // Canvas zoom/pan
+  canvasZoom: 1,
+  canvasPanX: 0,
+  canvasPanY: 0,
+  setCanvasZoom: (z) => set({ canvasZoom: Math.max(0.1, Math.min(5, z)) }),
+  setCanvasPan: (x, y) => set({ canvasPanX: x, canvasPanY: y }),
+  resetCanvasView: () => set({ canvasZoom: 1, canvasPanX: 0, canvasPanY: 0 }),
 
   // Export
   isExporting: false,
@@ -434,8 +558,9 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   // Clip splitting
   splitClipAtPlayhead: () =>
     set((s) => {
-      const { selectedClipId, currentTime } = s;
-      if (selectedClipId == null) return s;
+      const { selectedClipIds, currentTime } = s;
+      if (selectedClipIds.length === 0) return s;
+      const selectedClipId = selectedClipIds[selectedClipIds.length - 1];
       const clip = s.timelineClips.find((c) => c.id === selectedClipId);
       if (!clip) return s;
 
@@ -464,7 +589,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       return {
         timelineClips: s.timelineClips.map((c) => (c.id === clip.id ? leftClip : c)).concat(rightClip),
         clipIdCounter: newId,
-        selectedClipId: newId,
+        selectedClipIds: [newId],
       };
     }),
 
@@ -525,7 +650,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         tracks: [1, 2],
         trackIdCounter: 2,
         clipIdCounter: 0,
-        selectedClipId: null,
+        selectedClipIds: [],
         selectedMediaIndex: null,
         currentTime: 0,
         isPlaying: false,
@@ -554,8 +679,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       const resolvedMedia = data.mediaFiles.map((mf) => {
         const resolved = {
           ...mf,
-          path: dir + '/' + mf.path,
-          ...(mf.bundlePath ? { bundlePath: dir + '/' + mf.bundlePath } : {}),
+          path: toProjectAbsolutePath(mf.path, dir),
+          ...(mf.bundlePath ? { bundlePath: toProjectAbsolutePath(mf.bundlePath, dir) } : {}),
         };
         if (resolved.propDefinitions) {
           for (const def of Object.values(resolved.propDefinitions)) {
@@ -564,10 +689,22 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         }
         return resolved;
       });
-      const resolvedClips = data.timelineClips.map((c) => ({
-        ...c,
-        mediaPath: dir + '/' + c.mediaPath,
-      }));
+      const resolvedMediaLookup = buildMediaLookup(resolvedMedia, dir);
+      const resolvedClips = data.timelineClips.map((c) => {
+        const mediaPath = toProjectAbsolutePath(c.mediaPath, dir);
+        const clipMedia = resolvedMediaLookup.get(mediaPath) ?? resolvedMediaLookup.get(c.mediaPath);
+        const componentProps = remapComponentMediaRefs(
+          c.componentProps,
+          clipMedia?.propDefinitions,
+          resolvedMediaLookup,
+          (value) => toProjectAbsolutePath(value, dir),
+        );
+        return {
+          ...c,
+          mediaPath,
+          ...(componentProps ? { componentProps } : {}),
+        };
+      });
 
       set({
         currentProject: name,
@@ -580,7 +717,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         trackIdCounter: data.trackIdCounter,
         clipIdCounter: data.clipIdCounter,
         exportSettings: data.exportSettings,
-        selectedClipId: null,
+        selectedClipIds: [],
         selectedMediaIndex: null,
         currentTime: 0,
         isPlaying: false,
@@ -606,10 +743,22 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         path: mf.path.startsWith(dir + '/') ? mf.path.slice(dir.length + 1) : mf.path,
         ...(mf.bundlePath ? { bundlePath: mf.bundlePath.startsWith(dir + '/') ? mf.bundlePath.slice(dir.length + 1) : mf.bundlePath } : {}),
       }));
-      const relativeClips = s.timelineClips.map((c) => ({
-        ...c,
-        mediaPath: c.mediaPath.startsWith(dir + '/') ? c.mediaPath.slice(dir.length + 1) : c.mediaPath,
-      }));
+      const relativeMediaLookup = buildMediaLookup(relativeMedia, dir);
+      const relativeClips = s.timelineClips.map((c) => {
+        const mediaPath = c.mediaPath.startsWith(dir + '/') ? c.mediaPath.slice(dir.length + 1) : c.mediaPath;
+        const clipMedia = relativeMediaLookup.get(mediaPath) ?? relativeMediaLookup.get(c.mediaPath);
+        const componentProps = remapComponentMediaRefs(
+          c.componentProps,
+          clipMedia?.propDefinitions,
+          relativeMediaLookup,
+          (value) => toProjectRelativePath(value, dir) ?? value,
+        );
+        return {
+          ...c,
+          mediaPath,
+          ...(componentProps ? { componentProps } : {}),
+        };
+      });
 
       // Try loading existing project to preserve createdAt
       let createdAt: string;
@@ -656,7 +805,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       tracks: [1, 2],
       trackIdCounter: 2,
       clipIdCounter: 0,
-      selectedClipId: null,
+      selectedClipIds: [],
       selectedMediaIndex: null,
       currentTime: 0,
       isPlaying: false,

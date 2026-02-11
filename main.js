@@ -402,6 +402,63 @@ function ensureProjectsDir() {
   if (!fs.existsSync(projectsDir)) fs.mkdirSync(projectsDir, { recursive: true });
 }
 
+function normalizePathSeparators(p) {
+  return typeof p === 'string' ? p.replaceAll('\\', '/') : p;
+}
+
+function toProjectRelativePathMaybe(filePath, projectDir) {
+  if (typeof filePath !== 'string' || typeof projectDir !== 'string') return null;
+  const fp = normalizePathSeparators(filePath);
+  const dir = normalizePathSeparators(projectDir).replace(/\/+$/, '');
+  return fp.startsWith(dir + '/') ? fp.slice(dir.length + 1) : null;
+}
+
+function sanitizeProjectMediaReferences(data, projectDir) {
+  if (!data || typeof data !== 'object') return;
+  if (!Array.isArray(data.mediaFiles) || !Array.isArray(data.timelineClips)) return;
+
+  // Normalize mediaFiles paths first so downstream lookups are consistent.
+  const mediaPathSet = new Set();
+  const mediaByPath = new Map();
+  for (const mf of data.mediaFiles) {
+    if (!mf || typeof mf !== 'object' || typeof mf.path !== 'string') continue;
+    const relMediaPath = toProjectRelativePathMaybe(mf.path, projectDir);
+    if (relMediaPath) mf.path = relMediaPath;
+    mediaPathSet.add(mf.path);
+    mediaByPath.set(mf.path, mf);
+  }
+
+  for (const clip of data.timelineClips) {
+    if (!clip || typeof clip !== 'object') continue;
+    if (typeof clip.mediaPath === 'string') {
+      const relClipPath = toProjectRelativePathMaybe(clip.mediaPath, projectDir);
+      if (relClipPath) clip.mediaPath = relClipPath;
+    }
+
+    if (!clip.componentProps || typeof clip.componentProps !== 'object') continue;
+
+    const clipMedia = typeof clip.mediaPath === 'string' ? mediaByPath.get(clip.mediaPath) : undefined;
+    const propDefinitions = clipMedia && typeof clipMedia.propDefinitions === 'object' ? clipMedia.propDefinitions : undefined;
+    if (!propDefinitions) continue;
+
+    for (const [propName, def] of Object.entries(propDefinitions)) {
+      if (!def || typeof def !== 'object') continue;
+      if (def.type !== 'media' && def.type !== 'component') continue;
+      const rawValue = clip.componentProps[propName];
+      if (typeof rawValue !== 'string' || rawValue === '') continue;
+
+      const relRef = toProjectRelativePathMaybe(rawValue, projectDir);
+      const normalizedRef = relRef || rawValue;
+      if (mediaPathSet.has(normalizedRef)) {
+        clip.componentProps[propName] = normalizedRef;
+      } else {
+        // Stale media refs must be recoverable instead of surfacing repeated warnings/crashes.
+        clip.componentProps[propName] = '';
+      }
+    }
+  }
+}
+
 ipcMain.handle('list-projects', async () => {
   ensureProjectsDir();
   const entries = await fs.promises.readdir(projectsDir, { withFileTypes: true });
@@ -431,6 +488,7 @@ ipcMain.handle('load-project', async (_evt, name) => {
 
     // Validate project structure and integrity
     const projectDir = path.join(projectsDir, name);
+    sanitizeProjectMediaReferences(data, projectDir);
     const { structureErrors, integrityErrors, warnings } = validateProject(data, projectDir);
     if (structureErrors.length > 0 || integrityErrors.length > 0) {
       const allErrors = [...structureErrors, ...integrityErrors];

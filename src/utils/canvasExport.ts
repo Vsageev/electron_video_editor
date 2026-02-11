@@ -184,11 +184,19 @@ export async function exportToVideo(
         const nh = video.videoHeight;
         const base = fitSize(nw, nh, width, height);
         const animTime = timelineTime - clip.startTime;
-        const { x, y, scale, scaleX, scaleY } = getAnimatedTransform(clip, animTime);
+        const { x, y, scale, scaleX, scaleY, rotation } = getAnimatedTransform(clip, animTime);
         const scaledW = base.w * scale * scaleX;
         const scaledH = base.h * scale * scaleY;
         const drawX = (width - scaledW) / 2 + x * base.w;
         const drawY = (height - scaledH) / 2 + y * base.h;
+
+        const needsRotation = rotation !== 0;
+        if (needsRotation) {
+          ctx.save();
+          ctx.translate(drawX + scaledW / 2, drawY + scaledH / 2);
+          ctx.rotate((rotation * Math.PI) / 180);
+          ctx.translate(-(drawX + scaledW / 2), -(drawY + scaledH / 2));
+        }
 
         const mask = getAnimatedMask(clip, animTime);
         if (mask) {
@@ -226,6 +234,9 @@ export async function exportToVideo(
         if (mask) {
           ctx.restore();
         }
+        if (needsRotation) {
+          ctx.restore();
+        }
       }
     }
 
@@ -238,11 +249,19 @@ export async function exportToVideo(
         const nh = img.naturalHeight;
         const base = fitSize(nw, nh, width, height);
         const animTime = timelineTime - clip.startTime;
-        const { x, y, scale, scaleX, scaleY } = getAnimatedTransform(clip, animTime);
+        const { x, y, scale, scaleX, scaleY, rotation } = getAnimatedTransform(clip, animTime);
         const scaledW = base.w * scale * scaleX;
         const scaledH = base.h * scale * scaleY;
         const drawX = (width - scaledW) / 2 + x * base.w;
         const drawY = (height - scaledH) / 2 + y * base.h;
+
+        const needsRotation = rotation !== 0;
+        if (needsRotation) {
+          ctx.save();
+          ctx.translate(drawX + scaledW / 2, drawY + scaledH / 2);
+          ctx.rotate((rotation * Math.PI) / 180);
+          ctx.translate(-(drawX + scaledW / 2), -(drawY + scaledH / 2));
+        }
 
         const mask = getAnimatedMask(clip, animTime);
         if (mask) {
@@ -280,6 +299,9 @@ export async function exportToVideo(
         if (mask) {
           ctx.restore();
         }
+        if (needsRotation) {
+          ctx.restore();
+        }
       }
     }
 
@@ -293,11 +315,19 @@ export async function exportToVideo(
         const currentTime = timelineTime - clip.startTime;
         const progress = clip.duration > 0 ? currentTime / clip.duration : 0;
         const animTime = timelineTime - clip.startTime;
-        const { x, y, scale, scaleX, scaleY } = getAnimatedTransform(clip, animTime);
+        const { x, y, scale, scaleX, scaleY, rotation } = getAnimatedTransform(clip, animTime);
         const scaledW = width * scale * scaleX;
         const scaledH = height * scale * scaleY;
         const drawX = (width - scaledW) / 2 + x * width;
         const drawY = (height - scaledH) / 2 + y * height;
+
+        const compNeedsRotation = rotation !== 0;
+        if (compNeedsRotation) {
+          ctx.save();
+          ctx.translate(drawX + scaledW / 2, drawY + scaledH / 2);
+          ctx.rotate((rotation * Math.PI) / 180);
+          ctx.translate(-(drawX + scaledW / 2), -(drawY + scaledH / 2));
+        }
 
         try {
           flushSync(() => {
@@ -324,6 +354,10 @@ export async function exportToVideo(
           ctx.drawImage(rasterCanvas, drawX, drawY, scaledW, scaledH);
         } catch (e) {
           console.warn(`Component rasterization failed for ${clip.mediaName}:`, e);
+        }
+
+        if (compNeedsRotation) {
+          ctx.restore();
         }
       }
     }

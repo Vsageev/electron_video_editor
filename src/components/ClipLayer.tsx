@@ -58,7 +58,7 @@ const VideoRenderer = memo(function VideoRenderer({
   clip: TimelineClip;
   globalTime: number;
   isPlaying: boolean;
-  onSelect: (id: number) => void;
+  onSelect: (id: number, e?: { ctrlKey?: boolean; metaKey?: boolean }) => void;
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const localTime = globalTime - clip.startTime + clip.trimStart;
@@ -90,7 +90,7 @@ const VideoRenderer = memo(function VideoRenderer({
 
   const handleClick = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
-    onSelect(clip.id);
+    onSelect(clip.id, e);
   }, [clip.id, onSelect]);
 
   return (
@@ -202,7 +202,7 @@ const ComponentRenderer = memo(function ComponentRenderer({
   globalTime: number;
   containerW: number;
   containerH: number;
-  onSelect: (id: number) => void;
+  onSelect: (id: number, e?: { ctrlKey?: boolean; metaKey?: boolean }) => void;
 }) {
   const [UserComponent, setUserComponent] = useState<React.ComponentType<ComponentClipProps> | null>(null);
   const [parentPropDefs, setParentPropDefs] = useState<Record<string, PropDefinition> | undefined>(undefined);
@@ -227,7 +227,7 @@ const ComponentRenderer = memo(function ComponentRenderer({
 
   const handleClick = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
-    onSelect(clip.id);
+    onSelect(clip.id, e);
   }, [clip.id, onSelect]);
 
   const currentTime = globalTime - clip.startTime;
@@ -293,7 +293,7 @@ const ImageRenderer = memo(function ImageRenderer({
 }: {
   clip: TimelineClip;
   onNaturalSize: (id: number, w: number, h: number) => void;
-  onSelect: (id: number) => void;
+  onSelect: (id: number, e?: { ctrlKey?: boolean; metaKey?: boolean }) => void;
 }) {
   const src = useMemo(() => filePathToFileUrl(clip.mediaPath), [clip.mediaPath]);
 
@@ -304,7 +304,7 @@ const ImageRenderer = memo(function ImageRenderer({
 
   const handleClick = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
-    onSelect(clip.id);
+    onSelect(clip.id, e);
   }, [clip.id, onSelect]);
 
   return (
@@ -327,11 +327,11 @@ const AudioRenderer = memo(function AudioRenderer({
   onSelect,
 }: {
   clip: TimelineClip;
-  onSelect: (id: number) => void;
+  onSelect: (id: number, e?: { ctrlKey?: boolean; metaKey?: boolean }) => void;
 }) {
   const handleClick = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
-    onSelect(clip.id);
+    onSelect(clip.id, e);
   }, [clip.id, onSelect]);
 
   return (
@@ -364,7 +364,7 @@ export interface ClipLayerProps {
   containerW: number;
   containerH: number;
   onNaturalSize: (id: number, w: number, h: number) => void;
-  onSelect: (id: number) => void;
+  onSelect: (id: number, e?: { ctrlKey?: boolean; metaKey?: boolean }) => void;
 }
 
 export default memo(function ClipLayer({

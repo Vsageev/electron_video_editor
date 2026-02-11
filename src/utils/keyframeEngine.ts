@@ -56,7 +56,7 @@ export function getAnimatedMask(
 export function getAnimatedTransform(
   clip: TimelineClip,
   clipLocalTime: number,
-): { x: number; y: number; scale: number; scaleX: number; scaleY: number } {
+): { x: number; y: number; scale: number; scaleX: number; scaleY: number; rotation: number } {
   const kf = clip.keyframes;
   return {
     x: evaluateKeyframes(kf?.x, clipLocalTime, clip.x),
@@ -64,5 +64,6 @@ export function getAnimatedTransform(
     scale: evaluateKeyframes(kf?.scale, clipLocalTime, clip.scale),
     scaleX: evaluateKeyframes(kf?.scaleX, clipLocalTime, clip.scaleX),
     scaleY: evaluateKeyframes(kf?.scaleY, clipLocalTime, clip.scaleY),
+    rotation: evaluateKeyframes(kf?.rotation, clipLocalTime, clip.rotation ?? 0),
   };
 }

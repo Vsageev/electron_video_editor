@@ -12,6 +12,18 @@ type EdgeDir = 'n' | 's' | 'e' | 'w';
 const CORNER_DIRS: CornerDir[] = ['nw', 'ne', 'sw', 'se'];
 const EDGE_DIRS: EdgeDir[] = ['n', 's', 'e', 'w'];
 
+const ASPECT_RATIO_PRESETS = [
+  { label: '16:9',  w: 16, h: 9  },
+  { label: '9:16',  w: 9,  h: 16 },
+  { label: '1:1',   w: 1,  h: 1  },
+  { label: '4:3',   w: 4,  h: 3  },
+  { label: '4:5',   w: 4,  h: 5  },
+];
+
+function roundEven(n: number) {
+  return Math.round(n / 2) * 2;
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -32,6 +44,7 @@ function makeTransformStyle(
   bh: number,
   sX = 1,
   sY = 1,
+  rotation = 0,
 ): React.CSSProperties {
   return {
     position: 'absolute',
@@ -39,7 +52,7 @@ function makeTransformStyle(
     height: bh * scale * sY,
     left: '50%',
     top: '50%',
-    transform: `translate(calc(-50% + ${x * bw}px), calc(-50% + ${y * bh}px))`,
+    transform: `translate(calc(-50% + ${x * bw}px), calc(-50% + ${y * bh}px))${rotation ? ` rotate(${rotation}deg)` : ''}`,
   };
 }
 
@@ -87,10 +100,10 @@ export default function PreviewPanel() {
   // ---- Store subscriptions ----
   const timelineClips = useEditorStore((s) => s.timelineClips);
   const mediaFiles = useEditorStore((s) => s.mediaFiles);
-  const selectedClipId = useEditorStore((s) => s.selectedClipId);
+  const selectedClipIds = useEditorStore((s) => s.selectedClipIds);
   const selectedClip = useEditorStore((s) => {
-    const id = s.selectedClipId;
-    return id != null ? s.timelineClips.find((c) => c.id === id) ?? null : null;
+    if (s.selectedClipIds.length !== 1) return null;
+    return s.timelineClips.find((c) => c.id === s.selectedClipIds[0]) ?? null;
   });
   const currentTime = useEditorStore((s) => s.currentTime);
   const isPlaying = useEditorStore((s) => s.isPlaying);
@@ -103,6 +116,42 @@ export default function PreviewPanel() {
   const setCurrentTime = useEditorStore((s) => s.setCurrentTime);
   const setIsPlaying = useEditorStore((s) => s.setIsPlaying);
   const setDuration = useEditorStore((s) => s.setDuration);
+  const canvasZoom = useEditorStore((s) => s.canvasZoom);
+  const canvasPanX = useEditorStore((s) => s.canvasPanX);
+  const canvasPanY = useEditorStore((s) => s.canvasPanY);
+  const setCanvasZoom = useEditorStore((s) => s.setCanvasZoom);
+  const setCanvasPan = useEditorStore((s) => s.setCanvasPan);
+  const resetCanvasView = useEditorStore((s) => s.resetCanvasView);
+  const exportSettings = useEditorStore((s) => s.exportSettings);
+  const setExportSettings = useEditorStore((s) => s.setExportSettings);
+
+  // ---- Aspect ratio ----
+  const currentAspectIdx = useMemo(() => {
+    const ratio = exportSettings.width / exportSettings.height;
+    const idx = ASPECT_RATIO_PRESETS.findIndex(
+      (p) => Math.abs(p.w / p.h - ratio) < 0.01,
+    );
+    return idx;
+  }, [exportSettings.width, exportSettings.height]);
+
+  const handleAspectChange = useCallback(
+    (e: React.ChangeEvent<HTMLSelectElement>) => {
+      const preset = ASPECT_RATIO_PRESETS[Number(e.target.value)];
+      if (!preset) return;
+      const maxDim = Math.max(exportSettings.width, exportSettings.height);
+      let w: number;
+      let h: number;
+      if (preset.w >= preset.h) {
+        h = roundEven(maxDim * (preset.h / preset.w));
+        w = maxDim;
+      } else {
+        w = roundEven(maxDim * (preset.w / preset.h));
+        h = maxDim;
+      }
+      setExportSettings({ width: w, height: h });
+    },
+    [exportSettings.width, exportSettings.height, setExportSettings],
+  );
 
   // ---- Track wrapper size via ResizeObserver ----
   useEffect(() => {
@@ -117,17 +166,35 @@ export default function PreviewPanel() {
 
   const selectClip = useEditorStore((s) => s.selectClip);
 
+  // ---- Canvas rect sized to export aspect ratio, fit inside wrapper ----
+  const CANVAS_PADDING = 32;
+  const canvasSize = useMemo(() => {
+    const availW = wrapperSize.w - CANVAS_PADDING * 2;
+    const availH = wrapperSize.h - CANVAS_PADDING * 2;
+    if (availW <= 0 || availH <= 0) return { w: 0, h: 0 };
+    return fitSize(exportSettings.width, exportSettings.height, availW, availH);
+  }, [wrapperSize, exportSettings.width, exportSettings.height]);
+
   // Natural-size callback from ClipLayers
   const handleNaturalSize = useCallback((id: number, w: number, h: number) => {
     setNaturalSizes((prev) => ({ ...prev, [id]: { w, h } }));
   }, []);
 
-  const handleSelectClip = useCallback((id: number) => {
-    selectClip(id);
+  const handleSelectClip = useCallback((id: number, e?: { ctrlKey?: boolean; metaKey?: boolean }) => {
+    if (e && (e.ctrlKey || e.metaKey)) {
+      selectClip(id, { toggle: true });
+    } else {
+      selectClip(id);
+    }
   }, [selectClip]);
 
   const handleWrapperClick = useCallback((e: React.MouseEvent) => {
-    if (e.target === e.currentTarget) {
+    const el = e.target as HTMLElement;
+    if (
+      e.target === e.currentTarget ||
+      el.classList.contains('canvas-zoom-layer') ||
+      el.classList.contains('canvas-rect')
+    ) {
       selectClip(null);
     }
   }, [selectClip]);
@@ -242,20 +309,22 @@ export default function PreviewPanel() {
     }
   }, [currentTime, showStandaloneVideo]);
 
-  // ---- Transform: move ----
+  // ---- Helper: get base size for any clip ----
+  const getClipBase = useCallback((clip: typeof timelineClips[0]) => {
+    const mediaFile = getMediaFile(clip.mediaPath);
+    const mediaType = mediaFile?.type ?? 'video';
+    if (mediaType === 'component' || mediaType === 'audio') {
+      return { w: canvasSize.w, h: canvasSize.h };
+    }
+    const nat = naturalSizes[clip.id];
+    if (!nat) return { w: 0, h: 0 };
+    return fitSize(nat.w, nat.h, canvasSize.w, canvasSize.h);
+  }, [getMediaFile, naturalSizes, canvasSize]);
+
   const getSelectedBase = useCallback(() => {
     if (!selectedClip) return { w: 0, h: 0 };
-    const mediaFile = getMediaFile(selectedClip.mediaPath);
-    const mediaType = mediaFile?.type ?? 'video';
-    // Component and audio clips fill the container
-    if (mediaType === 'component' || mediaType === 'audio') {
-      return { w: wrapperSize.w, h: wrapperSize.h };
-    }
-    // Video and image clips use natural size
-    const nat = naturalSizes[selectedClip.id];
-    if (!nat) return { w: 0, h: 0 };
-    return fitSize(nat.w, nat.h, wrapperSize.w, wrapperSize.h);
-  }, [selectedClip, getMediaFile, naturalSizes, wrapperSize]);
+    return getClipBase(selectedClip);
+  }, [selectedClip, getClipBase]);
 
   const setTransformProp = useCallback(
     (id: number, prop: AnimatableProp, value: number, localTime: number) => {
@@ -273,26 +342,70 @@ export default function PreviewPanel() {
     [updateClip, addKeyframe, updateKeyframe],
   );
 
+  // ---- Snapshot selected visible clips for group transforms ----
+  type ClipSnapshot = {
+    clip: typeof timelineClips[0];
+    base: { w: number; h: number };
+    anim: ReturnType<typeof getAnimatedTransform>;
+    clipLocalTime: number;
+    px: number; // pixel center x
+    py: number; // pixel center y
+  };
+
+  const snapshotSelectedVisible = useCallback((): { snapshots: ClipSnapshot[]; gcx: number; gcy: number } | null => {
+    const ids = useEditorStore.getState().selectedClipIds;
+    const ct = useEditorStore.getState().currentTime;
+    const snapshots: ClipSnapshot[] = [];
+    for (const vc of visibleClips) {
+      if (!ids.includes(vc.id)) continue;
+      const base = getClipBase(vc);
+      if (!base.w) continue;
+      const clt = ct - vc.startTime;
+      const anim = getAnimatedTransform(vc, clt);
+      const px = canvasSize.w / 2 + anim.x * base.w;
+      const py = canvasSize.h / 2 + anim.y * base.h;
+      snapshots.push({ clip: vc, base, anim, clipLocalTime: clt, px, py });
+    }
+    if (snapshots.length === 0) return null;
+    // Group center
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for (const s of snapshots) {
+      const hw = s.base.w * s.anim.scale * s.anim.scaleX / 2;
+      const hh = s.base.h * s.anim.scale * s.anim.scaleY / 2;
+      const rad = (s.anim.rotation || 0) * Math.PI / 180;
+      const cos = Math.cos(rad), sin = Math.sin(rad);
+      for (const [cx, cy] of [[-hw, -hh], [hw, -hh], [hw, hh], [-hw, hh]]) {
+        const rx = s.px + cx * cos - cy * sin;
+        const ry = s.py + cx * sin + cy * cos;
+        if (rx < minX) minX = rx;
+        if (rx > maxX) maxX = rx;
+        if (ry < minY) minY = ry;
+        if (ry > maxY) maxY = ry;
+      }
+    }
+    return { snapshots, gcx: (minX + maxX) / 2, gcy: (minY + maxY) / 2 };
+  }, [visibleClips, getClipBase, canvasSize]);
+
+  // ---- Transform: move (group-aware) ----
   const handleMoveDown = useCallback(
     (e: React.MouseEvent) => {
-      if (!selectedClip) return;
+      if (selectedClipIds.length === 0) return;
       if ((e.target as HTMLElement).dataset.handle) return;
       e.preventDefault();
       e.stopPropagation();
 
+      const snap = snapshotSelectedVisible();
+      if (!snap) return;
       const startX = e.clientX;
       const startY = e.clientY;
-      const clipLocalTime = currentTime - selectedClip.startTime;
-      const anim = getAnimatedTransform(selectedClip, clipLocalTime);
-      const origX = anim.x;
-      const origY = anim.y;
-      const base = getSelectedBase();
-      if (!base.w) return;
-      const id = selectedClip.id;
 
       const onMove = (ev: MouseEvent) => {
-        setTransformProp(id, 'x', origX + (ev.clientX - startX) / base.w, clipLocalTime);
-        setTransformProp(id, 'y', origY + (ev.clientY - startY) / base.h, clipLocalTime);
+        const dx = ev.clientX - startX;
+        const dy = ev.clientY - startY;
+        for (const s of snap.snapshots) {
+          setTransformProp(s.clip.id, 'x', s.anim.x + dx / s.base.w, s.clipLocalTime);
+          setTransformProp(s.clip.id, 'y', s.anim.y + dy / s.base.h, s.clipLocalTime);
+        }
       };
       const onUp = () => {
         document.removeEventListener('mousemove', onMove);
@@ -301,26 +414,34 @@ export default function PreviewPanel() {
       document.addEventListener('mousemove', onMove);
       document.addEventListener('mouseup', onUp);
     },
-    [selectedClip, currentTime, getSelectedBase, setTransformProp],
+    [selectedClipIds, snapshotSelectedVisible, setTransformProp],
   );
 
-  // ---- Transform: corner resize (uniform scale) ----
+  // ---- Transform: corner resize (uniform scale, group-aware) ----
   const handleCornerResizeDown = useCallback(
     (e: React.MouseEvent, dir: CornerDir) => {
-      if (!selectedClip) return;
+      if (selectedClipIds.length === 0) return;
       e.preventDefault();
       e.stopPropagation();
 
+      const snap = snapshotSelectedVisible();
+      if (!snap) return;
       const startX = e.clientX;
       const startY = e.clientY;
-      const clipLocalTime = currentTime - selectedClip.startTime;
-      const anim = getAnimatedTransform(selectedClip, clipLocalTime);
-      const origScale = anim.scale;
-      const origXPos = anim.x;
-      const origYPos = anim.y;
-      const base = getSelectedBase();
-      if (!base.w) return;
-      const id = selectedClip.id;
+      const isSingle = snap.snapshots.length === 1;
+      // For single clip, use first clip's base for scale sensitivity
+      const refW = isSingle ? snap.snapshots[0].base.w : (
+        (() => {
+          let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+          for (const s of snap.snapshots) {
+            const hw = s.base.w * s.anim.scale * s.anim.scaleX / 2;
+            const hh = s.base.h * s.anim.scale * s.anim.scaleY / 2;
+            minX = Math.min(minX, s.px - hw); maxX = Math.max(maxX, s.px + hw);
+            minY = Math.min(minY, s.py - hh); maxY = Math.max(maxY, s.py + hh);
+          }
+          return Math.max(1, maxX - minX);
+        })()
+      );
 
       const onMove = (ev: MouseEvent) => {
         const dx = ev.clientX - startX;
@@ -328,11 +449,17 @@ export default function PreviewPanel() {
         const signX = dir === 'nw' || dir === 'sw' ? -1 : 1;
         const signY = dir === 'nw' || dir === 'ne' ? -1 : 1;
         const delta = (dx * signX + dy * signY) / 2;
-        const newScale = Math.max(0.1, origScale + delta / (base.w * 0.5));
-        const dScale = newScale - origScale;
-        setTransformProp(id, 'scale', newScale, clipLocalTime);
-        setTransformProp(id, 'x', origXPos + (dir === 'nw' || dir === 'sw' ? dScale * 0.5 : -dScale * 0.5), clipLocalTime);
-        setTransformProp(id, 'y', origYPos + (dir === 'nw' || dir === 'ne' ? dScale * 0.5 : -dScale * 0.5), clipLocalTime);
+        const sRatio = Math.max(0.1, 1 + delta / (refW * 0.5));
+
+        for (const s of snap.snapshots) {
+          const newScale = Math.max(0.1, s.anim.scale * sRatio);
+          setTransformProp(s.clip.id, 'scale', newScale, s.clipLocalTime);
+          // Reposition: scale distance from group center
+          const newPx = snap.gcx + (s.px - snap.gcx) * sRatio;
+          const newPy = snap.gcy + (s.py - snap.gcy) * sRatio;
+          setTransformProp(s.clip.id, 'x', (newPx - canvasSize.w / 2) / s.base.w, s.clipLocalTime);
+          setTransformProp(s.clip.id, 'y', (newPy - canvasSize.h / 2) / s.base.h, s.clipLocalTime);
+        }
       };
       const onUp = () => {
         document.removeEventListener('mousemove', onMove);
@@ -341,10 +468,10 @@ export default function PreviewPanel() {
       document.addEventListener('mousemove', onMove);
       document.addEventListener('mouseup', onUp);
     },
-    [selectedClip, currentTime, getSelectedBase, setTransformProp],
+    [selectedClipIds, snapshotSelectedVisible, setTransformProp, canvasSize],
   );
 
-  // ---- Transform: edge resize (non-uniform scaleX / scaleY) ----
+  // ---- Transform: edge resize (non-uniform scaleX / scaleY) — single clip only ----
   const handleEdgeResizeDown = useCallback(
     (e: React.MouseEvent, dir: EdgeDir) => {
       if (!selectedClip) return;
@@ -391,6 +518,53 @@ export default function PreviewPanel() {
       document.addEventListener('mouseup', onUp);
     },
     [selectedClip, currentTime, getSelectedBase, setTransformProp],
+  );
+
+  // ---- Transform: rotation handle (group-aware) ----
+  const handleRotationDown = useCallback(
+    (e: React.MouseEvent) => {
+      if (selectedClipIds.length === 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+
+      const snap = snapshotSelectedVisible();
+      if (!snap) return;
+
+      const box = (e.target as HTMLElement).closest('.canvas-transform-box') || (e.target as HTMLElement).closest('.canvas-group-box');
+      if (!box) return;
+      const rect = box.getBoundingClientRect();
+      const centerX = rect.left + rect.width / 2;
+      const centerY = rect.top + rect.height / 2;
+      const startAngle = Math.atan2(e.clientY - centerY, e.clientX - centerX) * (180 / Math.PI);
+
+      const onMove = (ev: MouseEvent) => {
+        const angle = Math.atan2(ev.clientY - centerY, ev.clientX - centerX) * (180 / Math.PI);
+        let dTheta = angle - startAngle;
+        if (ev.shiftKey) {
+          dTheta = Math.round(dTheta / 15) * 15;
+        }
+        const dRad = dTheta * Math.PI / 180;
+        const cosD = Math.cos(dRad), sinD = Math.sin(dRad);
+
+        for (const s of snap.snapshots) {
+          // Orbit position around group center
+          const relX = s.px - snap.gcx;
+          const relY = s.py - snap.gcy;
+          const newRelX = relX * cosD - relY * sinD;
+          const newRelY = relX * sinD + relY * cosD;
+          setTransformProp(s.clip.id, 'x', (snap.gcx + newRelX - canvasSize.w / 2) / s.base.w, s.clipLocalTime);
+          setTransformProp(s.clip.id, 'y', (snap.gcy + newRelY - canvasSize.h / 2) / s.base.h, s.clipLocalTime);
+          setTransformProp(s.clip.id, 'rotation', s.anim.rotation + dTheta, s.clipLocalTime);
+        }
+      };
+      const onUp = () => {
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+      };
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    },
+    [selectedClipIds, snapshotSelectedVisible, setTransformProp, canvasSize],
   );
 
   // ---- Mask: set property (keyframe-aware, writes to clip.mask) ----
@@ -552,6 +726,70 @@ export default function PreviewPanel() {
     [selectedClip, currentTime, getSelectedBase, setMaskProp],
   );
 
+  // ---- Canvas zoom (Ctrl/Cmd+wheel) & pan (scroll / middle-click / space+drag) ----
+  const handleCanvasWheel = useCallback(
+    (e: React.WheelEvent) => {
+      if (e.ctrlKey || e.metaKey) {
+        // Zoom toward cursor
+        e.preventDefault();
+        const state = useEditorStore.getState();
+        const oldZoom = state.canvasZoom;
+        const delta = -e.deltaY * 0.002;
+        const newZoom = Math.max(0.1, Math.min(5, oldZoom + delta * oldZoom));
+
+        const rect = wrapperRef.current?.getBoundingClientRect();
+        if (rect) {
+          const cx = e.clientX - rect.left - rect.width / 2;
+          const cy = e.clientY - rect.top - rect.height / 2;
+          const scale = newZoom / oldZoom;
+          const newPanX = cx - scale * (cx - state.canvasPanX);
+          const newPanY = cy - scale * (cy - state.canvasPanY);
+          setCanvasPan(newPanX, newPanY);
+        }
+        setCanvasZoom(newZoom);
+      } else {
+        // Pan with scroll
+        e.preventDefault();
+        const state = useEditorStore.getState();
+        setCanvasPan(state.canvasPanX - e.deltaX, state.canvasPanY - e.deltaY);
+      }
+    },
+    [setCanvasZoom, setCanvasPan],
+  );
+
+  const spaceHeld = useRef(false);
+  useEffect(() => {
+    const onDown = (e: KeyboardEvent) => { if (e.code === 'Space' && !e.repeat) spaceHeld.current = true; };
+    const onUp = (e: KeyboardEvent) => { if (e.code === 'Space') spaceHeld.current = false; };
+    window.addEventListener('keydown', onDown);
+    window.addEventListener('keyup', onUp);
+    return () => { window.removeEventListener('keydown', onDown); window.removeEventListener('keyup', onUp); };
+  }, []);
+
+  const handleCanvasPanDown = useCallback(
+    (e: React.MouseEvent) => {
+      // Middle mouse button or space+left click
+      if (e.button !== 1 && !(spaceHeld.current && e.button === 0)) return;
+      e.preventDefault();
+      const startX = e.clientX;
+      const startY = e.clientY;
+      const state = useEditorStore.getState();
+      const origPanX = state.canvasPanX;
+      const origPanY = state.canvasPanY;
+
+      const onMove = (ev: MouseEvent) => {
+        setCanvasPan(origPanX + (ev.clientX - startX), origPanY + (ev.clientY - startY));
+      };
+      const onUp = () => {
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+      };
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    },
+    [setCanvasPan],
+  );
+
   // ---- Transport ----
   const togglePlay = useCallback(() => setIsPlaying(!isPlaying), [isPlaying, setIsPlaying]);
 
@@ -565,13 +803,23 @@ export default function PreviewPanel() {
   }, [setCurrentTime]);
 
   // ---- Handle overlay ----
-  const showHandles =
+  const isMultiSelect = selectedClipIds.length > 1;
+  const showSingleHandles =
     selectedClip &&
+    !isMultiSelect &&
     visibleClips.some((c) => c.id === selectedClip.id);
+
+  // Selected visible clips for group box
+  const selectedVisibleClips = useMemo(() => {
+    if (selectedClipIds.length === 0) return [];
+    const idSet = new Set(selectedClipIds);
+    return visibleClips.filter((c) => idSet.has(c.id));
+  }, [selectedClipIds, visibleClips]);
+  const showGroupBox = isMultiSelect && selectedVisibleClips.length >= 2;
 
   let handleStyle: React.CSSProperties | undefined;
   let selectedMask: ClipMask | null = null;
-  if (showHandles && selectedClip) {
+  if (showSingleHandles && selectedClip) {
     const base = getSelectedBase();
     if (base.w > 0) {
       const clipLocalTime = currentTime - selectedClip.startTime;
@@ -584,35 +832,101 @@ export default function PreviewPanel() {
         base.h,
         anim.scaleX,
         anim.scaleY,
+        anim.rotation,
       );
       selectedMask = getAnimatedMask(selectedClip, clipLocalTime);
     }
   }
 
+  // Group bounding box (AABB) for multi-select
+  const groupBoxStyle = useMemo((): React.CSSProperties | null => {
+    if (!showGroupBox) return null;
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for (const vc of selectedVisibleClips) {
+      const base = getClipBase(vc);
+      if (!base.w) continue;
+      const clt = currentTime - vc.startTime;
+      const anim = getAnimatedTransform(vc, clt);
+      const px = canvasSize.w / 2 + anim.x * base.w;
+      const py = canvasSize.h / 2 + anim.y * base.h;
+      const hw = base.w * anim.scale * anim.scaleX / 2;
+      const hh = base.h * anim.scale * anim.scaleY / 2;
+      const rad = (anim.rotation || 0) * Math.PI / 180;
+      const cos = Math.cos(rad), sin = Math.sin(rad);
+      for (const [cx, cy] of [[-hw, -hh], [hw, -hh], [hw, hh], [-hw, hh]]) {
+        const rx = px + cx * cos - cy * sin;
+        const ry = py + cx * sin + cy * cos;
+        if (rx < minX) minX = rx;
+        if (rx > maxX) maxX = rx;
+        if (ry < minY) minY = ry;
+        if (ry > maxY) maxY = ry;
+      }
+    }
+    if (!isFinite(minX)) return null;
+    return {
+      position: 'absolute',
+      left: minX,
+      top: minY,
+      width: maxX - minX,
+      height: maxY - minY,
+    };
+  }, [showGroupBox, selectedVisibleClips, currentTime, canvasSize, getClipBase]);
+
   // ---- Render ----
   return (
     <div className="preview-container">
-      <div className="preview-wrapper" ref={wrapperRef} onMouseDown={handleWrapperClick}>
+      <div className="preview-toolbar">
+        <select
+          className="aspect-ratio-select"
+          value={currentAspectIdx >= 0 ? currentAspectIdx : ''}
+          onChange={handleAspectChange}
+        >
+          {currentAspectIdx < 0 && (
+            <option value="" disabled>
+              {exportSettings.width}×{exportSettings.height}
+            </option>
+          )}
+          {ASPECT_RATIO_PRESETS.map((p, i) => (
+            <option key={p.label} value={i}>
+              {p.label}
+            </option>
+          ))}
+        </select>
+        <span className="aspect-ratio-dims">
+          {exportSettings.width}×{exportSettings.height}
+        </span>
+      </div>
+      <div
+        className="preview-wrapper"
+        ref={wrapperRef}
+        onMouseDown={(e) => { handleCanvasPanDown(e); handleWrapperClick(e); }}
+        onWheel={handleCanvasWheel}
+      >
+        <div
+          className="canvas-zoom-layer"
+          style={{ transform: `translate(${canvasPanX}px, ${canvasPanY}px) scale(${canvasZoom})` }}
+        >
+        <div className="canvas-rect" style={{ width: canvasSize.w, height: canvasSize.h }}>
         {/* Timeline composite: one ClipLayer per visible clip */}
         {hasTimelineClips &&
           visibleClips.map((clip) => {
             const mediaFile = getMediaFile(clip.mediaPath);
             const mediaType = mediaFile?.type ?? 'video';
             const clipLocalTime = currentTime - clip.startTime;
-            const { x, y, scale, scaleX, scaleY } = getAnimatedTransform(clip, clipLocalTime);
+            const { x, y, scale, scaleX, scaleY, rotation } = getAnimatedTransform(clip, clipLocalTime);
             const animMask = getAnimatedMask(clip, clipLocalTime);
 
-            // For video/image clips, use natural size; for others, use wrapper size
+            // For video/image clips, use natural size; for others, use canvas size
             const nat = naturalSizes[clip.id];
             const base = ((mediaType === 'video' || mediaType === 'image') && nat)
-              ? fitSize(nat.w, nat.h, wrapperSize.w, wrapperSize.h)
-              : { w: wrapperSize.w, h: wrapperSize.h };
+              ? fitSize(nat.w, nat.h, canvasSize.w, canvasSize.h)
+              : { w: canvasSize.w, h: canvasSize.h };
 
             const style: React.CSSProperties =
               base.w > 0
                 ? {
-                    ...makeTransformStyle(x, y, scale, base.w, base.h, scaleX, scaleY),
-                    overflow: 'hidden',
+                    ...makeTransformStyle(x, y, scale, base.w, base.h, scaleX, scaleY, rotation),
+                    ...(animMask ? { overflow: 'hidden' } : {}),
                     ...(animMask ? { clipPath: buildClipPath(animMask) } : {}),
                     ...(animMask && animMask.feather > 0 ? { filter: `blur(${animMask.feather}px)` } : {}),
                   }
@@ -647,13 +961,13 @@ export default function PreviewPanel() {
         {showStandaloneImage && (
           <img
             src={filePathToFileUrl(previewMediaPath!)}
-            style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain' }}
+            style={{ width: '100%', height: '100%', objectFit: 'contain' }}
             draggable={false}
           />
         )}
 
-        {/* Transform handles for selected clip */}
-        {showHandles && handleStyle && (
+        {/* Single-clip transform handles */}
+        {showSingleHandles && handleStyle && (
           <div
             className="canvas-transform-box"
             style={handleStyle}
@@ -675,6 +989,12 @@ export default function PreviewPanel() {
                 onMouseDown={(e) => handleEdgeResizeDown(e, dir)}
               />
             ))}
+            <div className="canvas-rotation-stem" />
+            <div
+              className="canvas-rotation-handle"
+              data-handle="1"
+              onMouseDown={handleRotationDown}
+            />
             {selectedMask && (
               <div
                 className="mask-interact-box"
@@ -708,6 +1028,44 @@ export default function PreviewPanel() {
           </div>
         )}
 
+        {/* Group bounding box for multi-select */}
+        {showGroupBox && groupBoxStyle && (
+          <>
+            {/* Per-clip highlight outlines */}
+            {selectedVisibleClips.map((vc) => {
+              const base = getClipBase(vc);
+              if (!base.w) return null;
+              const clt = currentTime - vc.startTime;
+              const anim = getAnimatedTransform(vc, clt);
+              const style = makeTransformStyle(anim.x, anim.y, anim.scale, base.w, base.h, anim.scaleX, anim.scaleY, anim.rotation);
+              return (
+                <div key={vc.id} className="canvas-group-clip-outline" style={style} />
+              );
+            })}
+            {/* Group box with handles */}
+            <div
+              className="canvas-group-box"
+              style={groupBoxStyle}
+              onMouseDown={handleMoveDown}
+            >
+              {CORNER_DIRS.map((dir) => (
+                <div
+                  key={dir}
+                  className={`canvas-handle canvas-handle-${dir}`}
+                  data-handle="1"
+                  onMouseDown={(e) => handleCornerResizeDown(e, dir)}
+                />
+              ))}
+              <div className="canvas-rotation-stem" />
+              <div
+                className="canvas-rotation-handle"
+                data-handle="1"
+                onMouseDown={handleRotationDown}
+              />
+            </div>
+          </>
+        )}
+
         {/* Empty placeholder */}
         {showPlaceholder && (
           <div className="preview-placeholder">
@@ -718,6 +1076,17 @@ export default function PreviewPanel() {
             <p>Select a clip to preview</p>
           </div>
         )}
+        </div>{/* end canvas-rect */}
+        </div>{/* end canvas-zoom-layer */}
+
+        {/* Canvas zoom indicator — click to reset */}
+        <button
+          className={`canvas-zoom-badge${canvasZoom !== 1 || canvasPanX !== 0 || canvasPanY !== 0 ? ' canvas-zoom-badge--active' : ''}`}
+          onClick={resetCanvasView}
+          title="Reset canvas view (fit)"
+        >
+          {Math.round(canvasZoom * 100)}%
+        </button>
       </div>
 
       {/* Transport controls */}

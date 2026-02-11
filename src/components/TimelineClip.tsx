@@ -47,7 +47,16 @@ export default memo(function TimelineClip({ clip, zoom, isSelected }: TimelineCl
     (e: React.MouseEvent) => {
       if ((e.target as HTMLElement).classList.contains('clip-handle')) return;
       e.stopPropagation();
-      selectClip(clip.id);
+
+      if (e.ctrlKey || e.metaKey) {
+        selectClip(clip.id, { toggle: true });
+        return; // No drag on toggle
+      }
+      // Plain click on unselected clip → single select
+      if (!isSelected) {
+        selectClip(clip.id);
+      }
+      // If already selected (possibly multi), keep selection for group drag
 
       const startX = e.clientX;
       const startY = e.clientY;
@@ -115,7 +124,7 @@ export default memo(function TimelineClip({ clip, zoom, isSelected }: TimelineCl
       document.addEventListener('mousemove', onMove);
       document.addEventListener('mouseup', onUp);
     },
-    [clip.id, clip.startTime, clip.track, clip.duration, zoom, selectClip, updateClip, autoSnapEnabled, timelineClips, currentTime]
+    [clip.id, clip.startTime, clip.track, clip.duration, zoom, selectClip, updateClip, autoSnapEnabled, timelineClips, currentTime, isSelected]
   );
 
   const handleTrim = useCallback(

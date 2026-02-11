@@ -12,7 +12,7 @@ export interface ClipMask {
   invert: boolean;
 }
 
-export type AnimatableProp = 'x' | 'y' | 'scale' | 'scaleX' | 'scaleY' | 'maskCenterX' | 'maskCenterY' | 'maskWidth' | 'maskHeight' | 'maskFeather';
+export type AnimatableProp = 'x' | 'y' | 'scale' | 'scaleX' | 'scaleY' | 'rotation' | 'maskCenterX' | 'maskCenterY' | 'maskWidth' | 'maskHeight' | 'maskFeather';
 export type EasingType = 'linear' | 'ease-in' | 'ease-out' | 'ease-in-out';
 
 export interface Keyframe {
@@ -98,6 +98,7 @@ export interface TimelineClip {
   scale: number;
   scaleX: number;
   scaleY: number;
+  rotation: number; // degrees
   // Keyframe animation
   keyframes?: KeyframeMap;
   keyframeIdCounter?: number;

@@ -19,6 +19,14 @@ const EASING_LABELS: Record<EasingType, string> = {
   'ease-in-out': 'Ease In-Out',
 };
 
+function finiteNumber(value: unknown, fallback = 0): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+}
+
+function formatFixed(value: unknown, digits: number, fallback = 0): string {
+  return finiteNumber(value, fallback).toFixed(digits);
+}
+
 function KeyframeButton({
   clipId,
   prop,
@@ -68,12 +76,13 @@ function KeyframeButton({
 }
 
 export default function PropertiesSidebar() {
-  const { timelineClips, selectedClipId, updateClip, mediaFiles } = useEditorStore();
+  const { timelineClips, selectedClipIds, updateClip, mediaFiles } = useEditorStore();
   const currentTime = useEditorStore((s) => s.currentTime);
   const addKeyframe = useEditorStore((s) => s.addKeyframe);
   const updateKeyframe = useEditorStore((s) => s.updateKeyframe);
   const removeKeyframe = useEditorStore((s) => s.removeKeyframe);
-  const clip = timelineClips.find((c) => c.id === selectedClipId);
+  const isMultiSelect = selectedClipIds.length > 1;
+  const clip = isMultiSelect ? undefined : timelineClips.find((c) => c.id === selectedClipIds[0]);
   const clipMedia = clip ? mediaFiles.find((m) => m.path === clip.mediaPath) : undefined;
   const mediaRefOptions = useMemo(
     () => mediaFiles.filter((m) => m.path !== clip?.mediaPath),
@@ -83,14 +92,15 @@ export default function PropertiesSidebar() {
   const clipLocalTime = clip ? currentTime - clip.startTime : 0;
 
   const animatedValues = useMemo(() => {
-    if (!clip) return { x: 0, y: 0, scale: 1, scaleX: 1, scaleY: 1, maskCenterX: 0.5, maskCenterY: 0.5, maskWidth: 0.8, maskHeight: 0.8, maskFeather: 0 };
+    if (!clip) return { x: 0, y: 0, scale: 1, scaleX: 1, scaleY: 1, rotation: 0, maskCenterX: 0.5, maskCenterY: 0.5, maskWidth: 0.8, maskHeight: 0.8, maskFeather: 0 };
     const m = clip.mask;
     return {
-      x: evaluateKeyframes(clip.keyframes?.x, clipLocalTime, clip.x),
-      y: evaluateKeyframes(clip.keyframes?.y, clipLocalTime, clip.y),
-      scale: evaluateKeyframes(clip.keyframes?.scale, clipLocalTime, clip.scale),
-      scaleX: evaluateKeyframes(clip.keyframes?.scaleX, clipLocalTime, clip.scaleX),
-      scaleY: evaluateKeyframes(clip.keyframes?.scaleY, clipLocalTime, clip.scaleY),
+      x: evaluateKeyframes(clip.keyframes?.x, clipLocalTime, finiteNumber(clip.x, 0)),
+      y: evaluateKeyframes(clip.keyframes?.y, clipLocalTime, finiteNumber(clip.y, 0)),
+      scale: evaluateKeyframes(clip.keyframes?.scale, clipLocalTime, finiteNumber(clip.scale, 1)),
+      scaleX: evaluateKeyframes(clip.keyframes?.scaleX, clipLocalTime, finiteNumber(clip.scaleX, 1)),
+      scaleY: evaluateKeyframes(clip.keyframes?.scaleY, clipLocalTime, finiteNumber(clip.scaleY, 1)),
+      rotation: evaluateKeyframes(clip.keyframes?.rotation, clipLocalTime, clip.rotation ?? 0),
       maskCenterX: evaluateKeyframes(clip.keyframes?.maskCenterX, clipLocalTime, m?.centerX ?? 0.5),
       maskCenterY: evaluateKeyframes(clip.keyframes?.maskCenterY, clipLocalTime, m?.centerY ?? 0.5),
       maskWidth: evaluateKeyframes(clip.keyframes?.maskWidth, clipLocalTime, m?.width ?? 0.8),
@@ -117,7 +127,7 @@ export default function PropertiesSidebar() {
         const trimEnd = Math.max(0, Math.min(val, clip.originalDuration - clip.trimStart - 0.1));
         const duration = clip.originalDuration - clip.trimStart - trimEnd;
         updateClip(clip.id, { trimEnd, duration });
-      } else if (prop === 'x' || prop === 'y' || prop === 'scale' || prop === 'scaleX' || prop === 'scaleY') {
+      } else if (prop === 'x' || prop === 'y' || prop === 'scale' || prop === 'scaleX' || prop === 'scaleY' || prop === 'rotation') {
         const finalVal = (prop === 'scale' || prop === 'scaleX' || prop === 'scaleY') ? Math.max(0.1, val) : val;
         const kfs = clip.keyframes?.[prop as AnimatableProp];
         if (kfs && kfs.length > 0) {
@@ -164,6 +174,7 @@ export default function PropertiesSidebar() {
       scale: animatedValues.scale,
       scaleX: animatedValues.scaleX,
       scaleY: animatedValues.scaleY,
+      rotation: animatedValues.rotation,
       maskCenterX: animatedValues.maskCenterX,
       maskCenterY: animatedValues.maskCenterY,
       maskWidth: animatedValues.maskWidth,
@@ -174,7 +185,7 @@ export default function PropertiesSidebar() {
 
   const handleResetTransform = useCallback(() => {
     if (!clip) return;
-    updateClip(clip.id, { x: 0, y: 0, scale: 1, scaleX: 1, scaleY: 1, keyframes: undefined, keyframeIdCounter: undefined });
+    updateClip(clip.id, { x: 0, y: 0, scale: 1, scaleX: 1, scaleY: 1, rotation: 0, keyframes: undefined, keyframeIdCounter: undefined });
   }, [clip, updateClip]);
 
   const handleMaskShapeChange = useCallback((shape: MaskShape) => {
@@ -214,11 +225,12 @@ export default function PropertiesSidebar() {
   const keyframeGroups = useMemo(() => {
     if (!clip?.keyframes) return [];
     const timeMap = new Map<string, { time: number; entries: { prop: AnimatableProp; kf: Keyframe }[] }>();
-    for (const prop of ['x', 'y', 'scale', 'scaleX', 'scaleY', ...MASK_ANIMATABLE_PROPS] as AnimatableProp[]) {
+    for (const prop of ['x', 'y', 'scale', 'scaleX', 'scaleY', 'rotation', ...MASK_ANIMATABLE_PROPS] as AnimatableProp[]) {
       const kfs = clip.keyframes[prop];
       if (kfs) {
         for (const kf of kfs) {
-          const key = kf.time.toFixed(3);
+          if (!Number.isFinite(kf.time) || !Number.isFinite(kf.value)) continue;
+          const key = formatFixed(kf.time, 3);
           if (!timeMap.has(key)) {
             timeMap.set(key, { time: kf.time, entries: [] });
           }
@@ -253,15 +265,31 @@ export default function PropertiesSidebar() {
   const renderTransformRow = (label: string, prop: AnimatableProp, step: string, min?: string) => {
     if (!clip) return null;
     const kfs = clip.keyframes?.[prop];
+    const propDefaults: Record<AnimatableProp, number> = {
+      x: 0,
+      y: 0,
+      scale: 1,
+      scaleX: 1,
+      scaleY: 1,
+      rotation: 0,
+      maskCenterX: 0.5,
+      maskCenterY: 0.5,
+      maskWidth: 0.8,
+      maskHeight: 0.8,
+      maskFeather: 0,
+    };
     const maskPropMap: Record<string, keyof ClipMask> = {
       maskCenterX: 'centerX', maskCenterY: 'centerY',
       maskWidth: 'width', maskHeight: 'height', maskFeather: 'feather',
     };
     const isMaskProp = prop in maskPropMap;
-    const baseValue = isMaskProp ? ((clip.mask as any)?.[maskPropMap[prop]] ?? 0) : (clip as any)[prop];
+    const defaultValue = propDefaults[prop];
+    const baseValue = isMaskProp
+      ? finiteNumber((clip.mask as any)?.[maskPropMap[prop]], defaultValue)
+      : finiteNumber((clip as any)[prop], defaultValue);
     const displayValue = (kfs && kfs.length > 0)
-      ? animatedValues[prop].toFixed(2)
-      : (baseValue as number).toFixed(2);
+      ? formatFixed(animatedValues[prop], 2, defaultValue)
+      : formatFixed(baseValue, 2, defaultValue);
 
     return (
       <div className="property-row">
@@ -293,7 +321,11 @@ export default function PropertiesSidebar() {
         <span className="sidebar-label">PROPERTIES</span>
       </div>
       <div className="properties-content">
-        {!clip ? (
+        {isMultiSelect ? (
+          <div className="properties-empty">
+            <p>{selectedClipIds.length} clips selected</p>
+          </div>
+        ) : !clip ? (
           <div className="properties-empty">
             <p>Select a clip to view properties</p>
           </div>
@@ -452,7 +484,7 @@ export default function PropertiesSidebar() {
                   type="number"
                   step="0.1"
                   min="0"
-                  value={clip.startTime.toFixed(2)}
+                  value={formatFixed(clip.startTime, 2)}
                   onChange={(e) => handleChange('startTime', e.target.value)}
                 />
               </div>
@@ -464,7 +496,7 @@ export default function PropertiesSidebar() {
                     type="number"
                     step="0.1"
                     min="0.1"
-                    value={clip.duration.toFixed(2)}
+                    value={formatFixed(clip.duration, 2, 0.1)}
                     onChange={(e) => handleChange('duration', e.target.value)}
                   />
                 ) : (
@@ -494,6 +526,7 @@ export default function PropertiesSidebar() {
                   {renderTransformRow('Scale', 'scale', '0.05', '0.1')}
                   {renderTransformRow('Scale X', 'scaleX', '0.05', '0.1')}
                   {renderTransformRow('Scale Y', 'scaleY', '0.05', '0.1')}
+                  {renderTransformRow('Rotation', 'rotation', '1')}
                 </div>
 
                 <div className="property-group">
@@ -535,7 +568,7 @@ export default function PropertiesSidebar() {
                             step="0.01"
                             min="0"
                             max="0.5"
-                            value={clip.mask.borderRadius.toFixed(2)}
+                            value={formatFixed(clip.mask.borderRadius, 2)}
                             onChange={(e) => handleMaskBorderRadius(parseFloat(e.target.value) || 0)}
                           />
                         </div>
@@ -557,7 +590,7 @@ export default function PropertiesSidebar() {
                     <div className="property-group-title">Keyframes</div>
                     <div className="keyframe-list">
                       {keyframeGroups.map((group) => {
-                        const timeKey = group.time.toFixed(3);
+                        const timeKey = formatFixed(group.time, 3);
                         const isCollapsed = !expandedGroups.has(timeKey);
                         return (
                           <div key={timeKey} className="keyframe-group">
@@ -579,7 +612,7 @@ export default function PropertiesSidebar() {
                                       type="number"
                                       step="0.1"
                                       min="0"
-                                      value={kf.time.toFixed(2)}
+                                      value={formatFixed(kf.time, 2)}
                                       title="Time (s)"
                                       onChange={(e) =>
                                         updateKeyframe(clip.id, prop, kf.id, {
@@ -591,7 +624,7 @@ export default function PropertiesSidebar() {
                                       className="property-input keyframe-value-input"
                                       type="number"
                                       step={prop === 'scale' ? '0.05' : '0.01'}
-                                      value={kf.value.toFixed(2)}
+                                      value={formatFixed(kf.value, 2)}
                                       title="Value"
                                       onChange={(e) =>
                                         updateKeyframe(clip.id, prop, kf.id, {
@@ -642,7 +675,7 @@ export default function PropertiesSidebar() {
                     type="number"
                     step="0.1"
                     min="0"
-                    value={clip.trimStart.toFixed(2)}
+                    value={formatFixed(clip.trimStart, 2)}
                     onChange={(e) => handleChange('trimStart', e.target.value)}
                   />
                 </div>
@@ -653,7 +686,7 @@ export default function PropertiesSidebar() {
                     type="number"
                     step="0.1"
                     min="0"
-                    value={clip.trimEnd.toFixed(2)}
+                    value={formatFixed(clip.trimEnd, 2)}
                     onChange={(e) => handleChange('trimEnd', e.target.value)}
                   />
                 </div>

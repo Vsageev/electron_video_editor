@@ -1,4 +1,4 @@
-import { useEffect, useCallback, useRef, useState } from 'react';
+import { useEffect, useCallback, useRef, useState, useMemo } from 'react';
 import { useEditorStore } from '../store/editorStore';
 import { exportToVideo } from '../utils/canvasExport';
 import MediaSidebar from './MediaSidebar';
@@ -9,12 +9,90 @@ import ApiKeysModal from './ApiKeysModal';
 import ProjectPicker from './ProjectPicker';
 import Tooltip from './Tooltip';
 
-const RESOLUTION_PRESETS = [
-  { label: '4K (3840×2160)', width: 3840, height: 2160 },
-  { label: '1080p (1920×1080)', width: 1920, height: 1080 },
-  { label: '720p (1280×720)', width: 1280, height: 720 },
-  { label: '480p (854×480)', width: 854, height: 480 },
-];
+/* ---- Error Banner (expandable) ---- */
+function ErrorBanner({ error, onDismiss }: { error: string; onDismiss: () => void }) {
+  const [expanded, setExpanded] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = () => {
+    navigator.clipboard.writeText(error);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
+
+  // Split first line (summary) from the rest (stack/details)
+  const firstNewline = error.indexOf('\n');
+  const summary = firstNewline > 0 ? error.slice(0, firstNewline) : error;
+  const hasDetails = firstNewline > 0;
+
+  return (
+    <div className="error-banner">
+      <div className="error-banner-header" onClick={() => hasDetails && setExpanded(!expanded)}>
+        <svg className="error-banner-icon" width="14" height="14" viewBox="0 0 16 16" fill="none">
+          <circle cx="8" cy="8" r="6.5" stroke="currentColor" strokeWidth="1.2" />
+          <path d="M8 5v3.5M8 10.5v.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+        </svg>
+        <span className="error-banner-summary">{summary}</span>
+        {hasDetails && (
+          <button
+            className="error-banner-expand"
+            onClick={(e) => { e.stopPropagation(); setExpanded(!expanded); }}
+            aria-label={expanded ? 'Collapse' : 'Expand'}
+          >
+            <svg width="10" height="10" viewBox="0 0 10 10" fill="none" style={{ transform: expanded ? 'rotate(180deg)' : 'none', transition: 'transform 0.15s ease' }}>
+              <path d="M2 4l3 3 3-3" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </button>
+        )}
+        <button className="error-banner-copy" onClick={(e) => { e.stopPropagation(); handleCopy(); }} title="Copy full error" aria-label="Copy error text">
+          {copied ? (
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+              <path d="M2.5 6.5l2.5 2.5 5-5.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          ) : (
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+              <rect x="3.5" y="3.5" width="6.5" height="7" rx="1" stroke="currentColor" strokeWidth="1.1" />
+              <path d="M8.5 3.5V2.5a1 1 0 0 0-1-1h-5a1 1 0 0 0-1 1v5.5a1 1 0 0 0 1 1H3.5" stroke="currentColor" strokeWidth="1.1" />
+            </svg>
+          )}
+        </button>
+        <button className="error-banner-dismiss" onClick={(e) => { e.stopPropagation(); onDismiss(); }} title="Dismiss" aria-label="Dismiss error">
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+            <path d="M3 3l6 6M9 3l-6 6" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+          </svg>
+        </button>
+      </div>
+      {expanded && hasDetails && (
+        <div className="error-banner-details">
+          <pre className="error-banner-stack">{error}</pre>
+        </div>
+      )}
+    </div>
+  );
+}
+
+const BASE_DIMS = [2160, 1080, 720, 480];
+const BASE_LABELS = ['4K', '1080p', '720p', '480p'];
+
+function roundEven(n: number) {
+  return Math.round(n / 2) * 2;
+}
+
+function buildResolutionPresets(w: number, h: number) {
+  const ratio = w / h;
+  return BASE_DIMS.map((dim, i) => {
+    let pw: number;
+    let ph: number;
+    if (ratio >= 1) {
+      pw = roundEven(dim * ratio);
+      ph = dim;
+    } else {
+      pw = dim;
+      ph = roundEven(dim / ratio);
+    }
+    return { label: `${BASE_LABELS[i]} (${pw}×${ph})`, width: pw, height: ph };
+  });
+}
 
 const FPS_PRESETS = [24, 30, 60];
 
@@ -26,7 +104,7 @@ const QUALITY_PRESETS = [
 ];
 
 export default function App() {
-  const { removeClip } = useEditorStore();
+  const { removeSelectedClips } = useEditorStore();
   const timelineClips = useEditorStore((s) => s.timelineClips);
   const isExporting = useEditorStore((s) => s.isExporting);
   const exportProgress = useEditorStore((s) => s.exportProgress);
@@ -45,6 +123,10 @@ export default function App() {
   const clearProjectWarnings = useEditorStore((s) => s.clearProjectWarnings);
   const openProject = useEditorStore((s) => s.openProject);
   const createProject = useEditorStore((s) => s.createProject);
+  const resolutionPresets = useMemo(
+    () => buildResolutionPresets(exportSettings.width, exportSettings.height),
+    [exportSettings.width, exportSettings.height],
+  );
   const abortRef = useRef<AbortController | null>(null);
   const [showProjectPicker, setShowProjectPicker] = useState(false);
   const [projectLoading, setProjectLoading] = useState(true);
@@ -82,9 +164,9 @@ export default function App() {
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el.isContentEditable) return;
 
       if (e.code === 'Delete' || e.code === 'Backspace') {
-        const clipId = useEditorStore.getState().selectedClipId;
-        if (clipId != null) {
-          removeClip(clipId);
+        const { selectedClipIds } = useEditorStore.getState();
+        if (selectedClipIds.length > 0) {
+          removeSelectedClips();
         }
         return;
       }
@@ -115,7 +197,7 @@ export default function App() {
     };
     document.addEventListener('keydown', handleKeyDown);
     return () => document.removeEventListener('keydown', handleKeyDown);
-  }, [removeClip]);
+  }, [removeSelectedClips]);
 
   const handleExport = useCallback(async () => {
     if (timelineClips.length === 0) return;
@@ -168,13 +250,13 @@ export default function App() {
 
   const handleResolutionChange = useCallback(
     (e: React.ChangeEvent<HTMLSelectElement>) => {
-      const preset = RESOLUTION_PRESETS[Number(e.target.value)];
+      const preset = resolutionPresets[Number(e.target.value)];
       setExportSettings({ width: preset.width, height: preset.height });
     },
-    [setExportSettings],
+    [setExportSettings, resolutionPresets],
   );
 
-  const selectedResIdx = RESOLUTION_PRESETS.findIndex(
+  const selectedResIdx = resolutionPresets.findIndex(
     (p) => p.width === exportSettings.width && p.height === exportSettings.height,
   );
 
@@ -235,20 +317,7 @@ export default function App() {
       </div>
 
       {projectError && (
-        <div className="project-banner project-banner-error">
-          <div className="project-banner-content">
-            <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-              <circle cx="8" cy="8" r="6.5" stroke="currentColor" strokeWidth="1.2" />
-              <path d="M8 5v3.5M8 10.5v.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
-            </svg>
-            <span>{projectError}</span>
-          </div>
-          <button className="project-banner-dismiss" onClick={() => setProjectError(null)} title="Dismiss" aria-label="Dismiss error">
-            <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
-              <path d="M3 3l6 6M9 3l-6 6" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
-            </svg>
-          </button>
-        </div>
+        <ErrorBanner error={projectError} onDismiss={() => setProjectError(null)} />
       )}
 
       {projectWarnings.length > 0 && (
@@ -260,6 +329,12 @@ export default function App() {
             </svg>
             <span>{projectWarnings.join('; ')}</span>
           </div>
+          <button className="project-banner-copy" onClick={() => { navigator.clipboard.writeText(projectWarnings.join('; ')); }} title="Copy warning" aria-label="Copy warning text">
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+              <rect x="3.5" y="3.5" width="6.5" height="7" rx="1" stroke="currentColor" strokeWidth="1.1" />
+              <path d="M8.5 3.5V2.5a1 1 0 0 0-1-1h-5a1 1 0 0 0-1 1v5.5a1 1 0 0 0 1 1H3.5" stroke="currentColor" strokeWidth="1.1" />
+            </svg>
+          </button>
           <button className="project-banner-dismiss" onClick={clearProjectWarnings} title="Dismiss" aria-label="Dismiss warnings">
             <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
               <path d="M3 3l6 6M9 3l-6 6" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
@@ -284,7 +359,7 @@ export default function App() {
                 value={selectedResIdx >= 0 ? selectedResIdx : 1}
                 onChange={handleResolutionChange}
               >
-                {RESOLUTION_PRESETS.map((p, i) => (
+                {resolutionPresets.map((p, i) => (
                   <option key={i} value={i}>{p.label}</option>
                 ))}
               </select>

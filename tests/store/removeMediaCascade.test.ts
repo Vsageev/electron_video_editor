@@ -43,7 +43,7 @@ describe('editorStore.removeMediaFile cascading behavior', () => {
         { id: 1, mediaPath: mediaAPath, mediaName: 'a.mp4', track: 1, startTime: 0, duration: 1, trimStart: 0, trimEnd: 0, originalDuration: 1, x: 0, y: 0, scale: 1, scaleX: 1, scaleY: 1 },
         { id: 2, mediaPath: mediaBPath, mediaName: 'b.mp4', track: 1, startTime: 1, duration: 1, trimStart: 0, trimEnd: 0, originalDuration: 1, x: 0, y: 0, scale: 1, scaleX: 1, scaleY: 1 },
       ],
-      selectedClipId: 1,
+      selectedClipIds: [1],
       mediaMetadata: { [mediaAPath]: 'x', [mediaABundle]: 'y' },
     } as any);
 
@@ -52,7 +52,7 @@ describe('editorStore.removeMediaFile cascading behavior', () => {
     const s = useEditorStore.getState();
     expect(s.mediaFiles.map((m) => m.path)).toEqual([mediaBPath]);
     expect(s.timelineClips.map((c) => c.id)).toEqual([2]);
-    expect(s.selectedClipId).toBe(null);
+    expect(s.selectedClipIds).toEqual([]);
 
     // selected index shifts left after removal
     expect(s.selectedMediaIndex).toBe(0);

@@ -5,7 +5,7 @@ import TimelineClipComponent from './TimelineClip';
 import Tooltip from './Tooltip';
 
 export default function Timeline() {
-  const { timelineClips, selectedClipId, currentTime, zoom, setZoom, selectClip, addClipAtTime, mediaFiles, tracks, addTrack, removeTrack, splitClipAtPlayhead, rippleEnabled, toggleRipple, autoSnapEnabled, toggleAutoSnap } =
+  const { timelineClips, selectedClipIds, currentTime, zoom, setZoom, selectClip, addClipAtTime, mediaFiles, tracks, addTrack, removeTrack, splitClipAtPlayhead, rippleEnabled, toggleRipple, autoSnapEnabled, toggleAutoSnap } =
     useEditorStore();
   const containerRef = useRef<HTMLDivElement>(null);
   const isDraggingRef = useRef(false);
@@ -237,10 +237,10 @@ export default function Timeline() {
               className="btn-icon btn-sm"
               onClick={splitClipAtPlayhead}
             >
-              <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-                <path d="M7 1v12" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-                <path d="M3 4L7 7 3 10" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
-                <path d="M11 4L7 7 11 10" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
+                <circle cx="6" cy="6" r="3" stroke="currentColor" strokeWidth="2" />
+                <circle cx="6" cy="18" r="3" stroke="currentColor" strokeWidth="2" />
+                <path d="M8.6 8.1L18 20M8.6 15.9L18 4" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
               </svg>
             </button>
           </Tooltip>
@@ -336,7 +336,7 @@ export default function Timeline() {
                     key={clip.id}
                     clip={clip}
                     zoom={zoom}
-                    isSelected={clip.id === selectedClipId}
+                    isSelected={selectedClipIds.includes(clip.id)}
                   />
                 ))}
               </div>
