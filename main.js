@@ -1,7 +1,9 @@
 const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
-const { spawnSync } = require('child_process');
+const os = require('os');
+const https = require('https');
+const { spawnSync, execFile, spawn } = require('child_process');
 const { bundleComponent } = require('./scripts/bundleComponent.js');
 const { validateProject } = require('./scripts/validateProject.js');
 const { listBuiltinComponents, addBuiltinComponent } = require('./scripts/builtinComponents.js');
@@ -704,4 +706,470 @@ ipcMain.handle('add-builtin-component', async (_evt, projectName, fileName) => {
     fileName,
     bundleComponent,
   });
+});
+
+// ---------------------------------------------------------------------------
+// Tools — Image background removal via rembg
+// ---------------------------------------------------------------------------
+
+// Augmented PATH so GUI-launched Electron can find pip-installed CLIs
+function getAugmentedPath() {
+  const home = process.env.HOME || '';
+  const extra = [
+    '/opt/homebrew/bin',
+    '/usr/local/bin',
+    path.join(home, '.local', 'bin'),
+  ];
+  // macOS: pip --user installs scripts to ~/Library/Python/3.x/bin/
+  try {
+    const dirs = fs.readdirSync(path.join(home, 'Library', 'Python'));
+    for (const ver of dirs) {
+      extra.push(path.join(home, 'Library', 'Python', ver, 'bin'));
+    }
+  } catch { /* dir doesn't exist — not macOS or no user installs */ }
+  extra.push(process.env.PATH || '');
+  return extra.join(':');
+}
+
+function getAugmentedEnv() {
+  return { ...process.env, PATH: getAugmentedPath() };
+}
+
+// Python interpreters to try — pip may install into a different version than `python3`
+const PYTHON_CANDIDATES = ['python3', 'python3.13', 'python3.12', 'python3.11', 'python3.10', 'python3.9', 'python'];
+
+// Cached path of the Python interpreter that has rembg installed
+let _rembgPython = null;
+
+// Find a Python interpreter that can import rembg (including its onnxruntime dependency)
+// We check `from rembg.bg import remove` instead of just `import rembg` because the
+// top-level import can succeed even when onnxruntime is missing — the deeper import
+// exercises the full dependency chain.
+const REMBG_IMPORT_CHECK = 'from rembg.bg import remove';
+const REMBG_FILE_REMOVE_SCRIPT = [
+  'import sys, time',
+  'print("rembg:stage:importing", flush=True)',
+  'from rembg.bg import remove',
+  '',
+  'input_path = sys.argv[1]',
+  'output_path = sys.argv[2]',
+  '',
+  'print("rembg:stage:reading", flush=True)',
+  'with open(input_path, "rb") as f:',
+  '    input_bytes = f.read()',
+  '',
+  'print("rembg:stage:processing", flush=True)',
+  'output_bytes = remove(input_bytes)',
+  '',
+  'print("rembg:stage:writing", flush=True)',
+  'with open(output_path, "wb") as f:',
+  '    f.write(output_bytes)',
+  'print("rembg:stage:done", flush=True)',
+].join('\n');
+
+// Active rembg child process — allows cancellation from renderer
+let _activeRembgProcess = null;
+
+function findPythonWithRembg() {
+  const augEnv = getAugmentedEnv();
+  // Try cached interpreter first
+  if (_rembgPython) {
+    const r = spawnSync(_rembgPython, ['-c', REMBG_IMPORT_CHECK], { encoding: 'utf8', timeout: 15000, env: augEnv });
+    if (!r.error && r.status === 0) return _rembgPython;
+    _rembgPython = null;
+  }
+  for (const py of PYTHON_CANDIDATES) {
+    const r = spawnSync(py, ['-c', REMBG_IMPORT_CHECK], { encoding: 'utf8', timeout: 15000, env: augEnv });
+    if (!r.error && r.status === 0) {
+      _rembgPython = py;
+      return py;
+    }
+  }
+  return null;
+}
+
+// Find any available Python interpreter
+function findPython() {
+  const augEnv = getAugmentedEnv();
+  for (const py of PYTHON_CANDIDATES) {
+    const r = spawnSync(py, ['--version'], { encoding: 'utf8', timeout: 5000, env: augEnv });
+    if (!r.error && r.status === 0) return py;
+  }
+  return null;
+}
+
+ipcMain.handle('check-rembg', async () => {
+  const hasPython = !!findPython();
+  const hasRembg = !!findPythonWithRembg();
+  return { hasPython, hasRembg };
+});
+
+ipcMain.handle('install-rembg', async () => {
+  const augEnv = getAugmentedEnv();
+
+  // Find which Python interpreters actually exist so we don't waste time on missing ones
+  const availablePythons = [];
+  for (const py of PYTHON_CANDIDATES) {
+    const r = spawnSync(py, ['--version'], { encoding: 'utf8', timeout: 5000, env: augEnv });
+    if (!r.error && r.status === 0) availablePythons.push(py);
+  }
+
+  // Build install commands: use `python -m pip` to target the right interpreter.
+  // Explicitly install onnxruntime alongside rembg[cli] — pip doesn't always resolve it.
+  // --upgrade: fixes broken/partial installs; --no-cache-dir: avoids stale cached wheels.
+  const pipFlags = ['install', '--upgrade', '--no-cache-dir', 'rembg[cli]', 'onnxruntime'];
+  const installCommands = [];
+  for (const py of availablePythons) {
+    installCommands.push({ cmd: py, args: ['-m', 'pip', ...pipFlags] });
+  }
+  // Fall back to bare pip only if no Python interpreters were found
+  if (availablePythons.length === 0) {
+    installCommands.push({ cmd: 'pip3', args: pipFlags });
+    installCommands.push({ cmd: 'pip', args: pipFlags });
+  }
+
+  let lastOutput = '';
+  let lastError = '';
+
+  for (const { cmd, args } of installCommands) {
+    const result = await new Promise((resolve) => {
+      const proc = spawn(cmd, args, {
+        env: augEnv,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+
+      let output = '';
+      const sendLog = (chunk) => {
+        output += chunk;
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('rembg-install-log', output);
+        }
+      };
+
+      proc.stdout.on('data', (data) => sendLog(data.toString()));
+      proc.stderr.on('data', (data) => sendLog(data.toString()));
+
+      const timeout = setTimeout(() => {
+        proc.kill();
+        resolve({ status: 'timeout', output });
+      }, 300000);
+
+      proc.on('error', (err) => {
+        clearTimeout(timeout);
+        resolve({ status: err.code === 'ENOENT' ? 'not_found' : 'error', error: err.message, output });
+      });
+
+      proc.on('close', (code) => {
+        clearTimeout(timeout);
+        resolve({ status: code === 0 ? 'ok' : 'fail', code, output });
+      });
+    });
+
+    lastOutput = result.output || lastOutput;
+
+    if (result.status === 'not_found') continue;
+    if (result.status === 'timeout') return { success: false, error: 'Installation timed out after 5 minutes', log: lastOutput };
+    if (result.status === 'error') { lastError = result.error; continue; }
+    // Non-zero exit: try next candidate instead of giving up immediately
+    if (result.status === 'fail') { lastError = `Installation failed (exit code ${result.code})`; continue; }
+
+    // pip succeeded — verify rembg is fully importable (including onnxruntime)
+    _rembgPython = null;
+    const pyWithRembg = findPythonWithRembg();
+    if (!pyWithRembg) {
+      // Diagnose what's actually missing
+      const diagPy = availablePythons[0] || 'python3';
+      const diag = spawnSync(diagPy, ['-c', REMBG_IMPORT_CHECK], { encoding: 'utf8', timeout: 15000, env: augEnv });
+      const diagMsg = diag.stderr?.trim() || '';
+      const hint = diagMsg.includes('onnxruntime')
+        ? `onnxruntime failed to install. Try manually: ${diagPy} -m pip install onnxruntime`
+        : `rembg installed but cannot import. Try manually: ${diagPy} -m pip install rembg[cli]`;
+      return { success: false, error: hint, log: lastOutput + (diagMsg ? '\n\nDiagnostic:\n' + diagMsg : '') };
+    }
+    return { success: true, log: lastOutput };
+  }
+
+  return { success: false, error: lastError || 'pip not found. Please install Python 3 first: python.org/downloads', log: lastOutput };
+});
+
+// ---------------------------------------------------------------------------
+// Audio transcription via OpenAI Whisper API
+// ---------------------------------------------------------------------------
+
+ipcMain.handle('transcribe-audio', async (_evt, projectName, mediaRelativePath) => {
+  const keys = readApiKeys();
+  const apiKey = keys.OPENAI_API_KEY;
+  if (!apiKey) {
+    return { success: false, error: 'OPENAI_API_KEY not set. Configure it in Settings.' };
+  }
+
+  const projectDir = path.join(projectsDir, projectName);
+  const inputPath = path.join(projectDir, mediaRelativePath);
+  const resolved = path.resolve(inputPath);
+  if (!resolved.startsWith(path.resolve(projectDir) + path.sep)) {
+    return { success: false, error: 'Invalid path' };
+  }
+
+  const sendProgress = (msg) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('transcribe-progress', msg);
+    }
+  };
+
+  const ext = path.extname(resolved).toLowerCase();
+  const audioExts = ['.mp3', '.wav', '.ogg', '.aac', '.flac', '.m4a', '.webm'];
+  const isAudioFile = audioExts.includes(ext);
+
+  let audioFilePath = resolved;
+  let tempFile = null;
+
+  try {
+    // For video files (or large audio), extract/compress audio via ffmpeg
+    if (!isAudioFile) {
+      const augEnv = getAugmentedEnv();
+
+      // Probe for audio streams first
+      sendProgress('Checking for audio...');
+      const hasAudio = await new Promise((resolve) => {
+        const probe = spawnSync('ffprobe', [
+          '-v', 'error',
+          '-select_streams', 'a',
+          '-show_entries', 'stream=codec_type',
+          '-of', 'csv=p=0',
+          resolved,
+        ], { encoding: 'utf8', timeout: 10000, env: augEnv });
+        resolve(!probe.error && probe.status === 0 && (probe.stdout || '').trim().length > 0);
+      });
+
+      if (!hasAudio) {
+        return { success: false, error: 'This video file has no audio track. Subtitles require audio to transcribe.' };
+      }
+
+      sendProgress('Extracting audio...');
+      tempFile = path.join(os.tmpdir(), `editor_transcribe_${Date.now()}.mp3`);
+
+      await new Promise((resolve, reject) => {
+        const proc = spawn('ffmpeg', [
+          '-i', resolved,
+          '-vn', '-ac', '1', '-ar', '16000', '-b:a', '64k', '-f', 'mp3',
+          '-y', tempFile,
+        ], { env: augEnv, stdio: ['ignore', 'pipe', 'pipe'] });
+
+        let stderr = '';
+        proc.stderr.on('data', (d) => { stderr += d.toString(); });
+
+        proc.on('error', (err) => {
+          if (err.code === 'ENOENT') {
+            reject(new Error('ffmpeg not found. Install ffmpeg to extract audio from video files.'));
+          } else {
+            reject(err);
+          }
+        });
+
+        proc.on('close', (code) => {
+          if (code !== 0) reject(new Error(`ffmpeg failed (exit ${code}): ${stderr.slice(-500)}`));
+          else resolve();
+        });
+      });
+
+      audioFilePath = tempFile;
+    } else {
+      // Check if audio file is over 25MB — if so, compress via ffmpeg
+      const stat = await fs.promises.stat(resolved);
+      if (stat.size > 25 * 1024 * 1024) {
+        sendProgress('Compressing audio...');
+        tempFile = path.join(os.tmpdir(), `editor_transcribe_${Date.now()}.mp3`);
+        const augEnv = getAugmentedEnv();
+
+        await new Promise((resolve, reject) => {
+          const proc = spawn('ffmpeg', [
+            '-i', resolved,
+            '-vn', '-ac', '1', '-ar', '16000', '-b:a', '64k', '-f', 'mp3',
+            '-y', tempFile,
+          ], { env: augEnv, stdio: ['ignore', 'pipe', 'pipe'] });
+
+          let stderr = '';
+          proc.stderr.on('data', (d) => { stderr += d.toString(); });
+
+          proc.on('error', (err) => {
+            if (err.code === 'ENOENT') {
+              reject(new Error('ffmpeg not found. Install ffmpeg to compress large audio files.'));
+            } else {
+              reject(err);
+            }
+          });
+
+          proc.on('close', (code) => {
+            if (code !== 0) reject(new Error(`ffmpeg failed (exit ${code}): ${stderr.slice(-500)}`));
+            else resolve();
+          });
+        });
+
+        audioFilePath = tempFile;
+      }
+    }
+
+    sendProgress('Transcribing with Whisper...');
+
+    // Build multipart form data
+    const fileData = await fs.promises.readFile(audioFilePath);
+    const boundary = '----FormBoundary' + Date.now().toString(36) + Math.random().toString(36).slice(2);
+    const fileName = path.basename(audioFilePath);
+
+    const fields = [
+      ['model', 'whisper-1'],
+      ['response_format', 'verbose_json'],
+      ['timestamp_granularities[]', 'segment'],
+    ];
+
+    const parts = [];
+    for (const [name, value] of fields) {
+      parts.push(
+        `--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`
+      );
+    }
+
+    const fileHeader = `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${fileName}"\r\nContent-Type: application/octet-stream\r\n\r\n`;
+    const fileFooter = `\r\n--${boundary}--\r\n`;
+
+    const headerBuf = Buffer.from(parts.join('') + fileHeader, 'utf8');
+    const footerBuf = Buffer.from(fileFooter, 'utf8');
+    const body = Buffer.concat([headerBuf, fileData, footerBuf]);
+
+    const response = await new Promise((resolve, reject) => {
+      const req = https.request({
+        hostname: 'api.openai.com',
+        path: '/v1/audio/transcriptions',
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${apiKey}`,
+          'Content-Type': `multipart/form-data; boundary=${boundary}`,
+          'Content-Length': body.length,
+        },
+      }, (res) => {
+        let data = '';
+        res.on('data', (chunk) => { data += chunk; });
+        res.on('end', () => resolve({ status: res.statusCode, body: data }));
+      });
+
+      req.on('error', reject);
+      req.write(body);
+      req.end();
+    });
+
+    if (response.status !== 200) {
+      let errorMsg = `Whisper API error (${response.status})`;
+      try {
+        const parsed = JSON.parse(response.body);
+        if (parsed.error?.message) errorMsg = parsed.error.message;
+      } catch {}
+      return { success: false, error: errorMsg };
+    }
+
+    const result = JSON.parse(response.body);
+    const segments = (result.segments || []).map((seg) => ({
+      start: seg.start,
+      end: seg.end,
+      text: (seg.text || '').trim(),
+    }));
+
+    sendProgress('Done');
+    return { success: true, segments };
+  } catch (err) {
+    return { success: false, error: err.message || String(err) };
+  } finally {
+    if (tempFile) {
+      try { await fs.promises.unlink(tempFile); } catch {}
+    }
+  }
+});
+
+ipcMain.handle('remove-background', async (_evt, projectName, mediaRelativePath) => {
+  const projectDir = path.join(projectsDir, projectName);
+  const inputPath = path.join(projectDir, mediaRelativePath);
+
+  // Verify input is inside the project directory
+  const resolvedInput = path.resolve(inputPath);
+  if (!resolvedInput.startsWith(path.resolve(projectDir) + path.sep)) {
+    return { success: false, error: 'Invalid path' };
+  }
+
+  // Build output filename: <basename>_nobg.png with dedup counter
+  const mediaDir = path.join(projectDir, 'media');
+  const baseName = path.basename(inputPath, path.extname(inputPath));
+  let outputName = `${baseName}_nobg.png`;
+  let outputPath = path.join(mediaDir, outputName);
+  let counter = 1;
+  while (fs.existsSync(outputPath)) {
+    outputName = `${baseName}_nobg_${counter}.png`;
+    outputPath = path.join(mediaDir, outputName);
+    counter++;
+  }
+
+  const augEnv = getAugmentedEnv();
+  const sendProgress = (stage) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('rembg-progress', stage);
+    }
+  };
+
+  // Helper: run a command with spawn, stream progress, support cancellation
+  const runWithProgress = (cmd, args) => {
+    return new Promise((resolve) => {
+      const child = spawn(cmd, args, { env: augEnv, timeout: 120000 });
+      _activeRembgProcess = child;
+      let stderrBuf = '';
+
+      child.stdout.on('data', (data) => {
+        const text = data.toString();
+        // Parse progress stage markers from the Python script
+        const lines = text.split('\n');
+        for (const line of lines) {
+          const match = line.match(/^rembg:stage:(\w+)/);
+          if (match) sendProgress(match[1]);
+        }
+      });
+
+      child.stderr.on('data', (data) => {
+        stderrBuf += data.toString();
+      });
+
+      child.on('close', (code, signal) => {
+        _activeRembgProcess = null;
+        if (signal === 'SIGTERM' || signal === 'SIGKILL') {
+          resolve({ success: false, error: 'cancelled' });
+        } else if (code !== 0) {
+          resolve({ success: false, error: stderrBuf.trim() || `Process exited with code ${code}` });
+        } else {
+          resolve({ success: true, relativePath: 'media/' + outputName });
+        }
+      });
+
+      child.on('error', (err) => {
+        _activeRembgProcess = null;
+        resolve({ success: false, error: err.code === 'ENOENT' ? 'not_installed' : (stderrBuf.trim() || err.message) });
+      });
+    });
+  };
+
+  // Find the Python interpreter that has rembg installed
+  const pyWithRembg = findPythonWithRembg();
+
+  if (pyWithRembg) {
+    sendProgress('starting');
+    return runWithProgress(pyWithRembg, ['-c', REMBG_FILE_REMOVE_SCRIPT, resolvedInput, outputPath]);
+  }
+
+  // Fallback: try bare rembg CLI (globally installed)
+  sendProgress('starting');
+  return runWithProgress('rembg', ['i', resolvedInput, outputPath]);
+});
+
+ipcMain.handle('cancel-remove-background', async () => {
+  if (_activeRembgProcess) {
+    _activeRembgProcess.kill('SIGTERM');
+    _activeRembgProcess = null;
+    return { success: true };
+  }
+  return { success: false };
 });

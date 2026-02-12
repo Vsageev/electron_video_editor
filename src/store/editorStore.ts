@@ -210,6 +210,11 @@ interface EditorState {
   setProjectError: (msg: string | null) => void;
   clearProjectWarnings: () => void;
   closeProject: () => void;
+
+  // Subtitle generation
+  isGeneratingSubtitles: boolean;
+  subtitleProgress: string;
+  generateSubtitles: (clipId: number) => Promise<void>;
 }
 
 export const useEditorStore = create<EditorState>((set, get) => ({
@@ -790,6 +795,163 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       set({ projectError: `Save failed: ${err.message}` });
     } finally {
       set({ isSaving: false });
+    }
+  },
+
+  // Subtitle generation
+  isGeneratingSubtitles: false,
+  subtitleProgress: '',
+  generateSubtitles: async (clipId) => {
+    const s = get();
+    if (!s.currentProject || !s.projectDir) {
+      set({ projectError: 'No project open' });
+      return;
+    }
+
+    const clip = s.timelineClips.find((c) => c.id === clipId);
+    if (!clip) return;
+
+    const media = s.mediaFiles.find((m) => m.path === clip.mediaPath);
+    if (!media || (media.type !== 'video' && media.type !== 'audio')) {
+      set({ projectError: 'Subtitles can only be generated for video or audio clips' });
+      return;
+    }
+
+    // Check API key
+    try {
+      const keys = await window.api.getApiKeys();
+      if (!keys.OPENAI_API_KEY) {
+        set({ projectError: 'OPENAI_API_KEY not set. Configure it in Settings.' });
+        return;
+      }
+    } catch {
+      set({ projectError: 'Failed to read API keys' });
+      return;
+    }
+
+    set({ isGeneratingSubtitles: true, subtitleProgress: 'Starting...' });
+
+    // Subscribe to progress events
+    const unsub = window.api.onTranscribeProgress((msg: string) => {
+      set({ subtitleProgress: msg });
+    });
+
+    try {
+      // Get relative media path
+      const prefix = s.projectDir + '/';
+      const relativePath = media.path.startsWith(prefix)
+        ? media.path.slice(prefix.length)
+        : media.path;
+
+      const result = await window.api.transcribeAudio(s.currentProject, relativePath);
+
+      if (!result.success || !result.segments || result.segments.length === 0) {
+        set({ projectError: result.error || 'No speech detected in this clip' });
+        return;
+      }
+
+      // Ensure TextOverlay built-in is in project
+      let textOverlayMedia = s.mediaFiles.find(
+        (m) => m.type === 'component' && m.name === 'TextOverlay',
+      );
+
+      if (!textOverlayMedia) {
+        const addResult = await window.api.addBuiltinComponent(s.currentProject, 'TextOverlay.tsx');
+        if (!addResult.success) {
+          set({ projectError: `Failed to add TextOverlay component: ${addResult.error}` });
+          return;
+        }
+
+        const fullBundlePath = s.projectDir + '/' + addResult.bundlePath;
+        let propDefinitions;
+        try {
+          const { loadComponent } = await import('../utils/componentLoader');
+          const entry = await loadComponent(fullBundlePath);
+          propDefinitions = entry.propDefinitions;
+        } catch { /* ignore */ }
+
+        textOverlayMedia = {
+          path: s.projectDir + '/' + addResult.sourcePath,
+          name: 'TextOverlay',
+          ext: '.tsx',
+          type: 'component' as const,
+          duration: 5,
+          bundlePath: fullBundlePath,
+          ...(propDefinitions ? { propDefinitions } : {}),
+        };
+
+        // Add to media files
+        set((prev) => ({
+          mediaFiles: [...prev.mediaFiles.filter((m) => m.path !== textOverlayMedia!.path), textOverlayMedia!],
+        }));
+      }
+
+      // Re-read state after potential media additions
+      const current = get();
+      const exportHeight = current.exportSettings.height;
+
+      // Create a new track for subtitles
+      const newTrackId = current.trackIdCounter + 1;
+      let nextClipId = current.clipIdCounter;
+
+      const newClips: TimelineClip[] = [];
+
+      for (const seg of result.segments) {
+        // Map Whisper timestamps to timeline: clip.startTime - clip.trimStart + segment time
+        const timelineStart = clip.startTime - clip.trimStart + seg.start;
+        const timelineEnd = clip.startTime - clip.trimStart + seg.end;
+
+        // Clamp to clip's visible range
+        const clipVisibleStart = clip.startTime;
+        const clipVisibleEnd = clip.startTime + clip.duration;
+
+        const clampedStart = Math.max(timelineStart, clipVisibleStart);
+        const clampedEnd = Math.min(timelineEnd, clipVisibleEnd);
+        const segDuration = clampedEnd - clampedStart;
+
+        if (segDuration <= 0.05) continue;
+
+        nextClipId += 1;
+        newClips.push({
+          id: nextClipId,
+          mediaPath: textOverlayMedia.path,
+          mediaName: 'TextOverlay',
+          track: newTrackId,
+          startTime: clampedStart,
+          duration: segDuration,
+          trimStart: 0,
+          trimEnd: 0,
+          originalDuration: segDuration,
+          x: 0,
+          y: 0.4,
+          scale: 1,
+          scaleX: 1,
+          scaleY: 1,
+          rotation: 0,
+          componentProps: {
+            text: seg.text,
+            color: '#ffffff',
+            backgroundColor: 'rgba(0,0,0,0.6)',
+          },
+        });
+      }
+
+      if (newClips.length === 0) {
+        set({ projectError: 'No speech segments found within the clip range' });
+        return;
+      }
+
+      set((prev) => ({
+        tracks: [newTrackId, ...prev.tracks],
+        trackIdCounter: newTrackId,
+        timelineClips: [...prev.timelineClips, ...newClips],
+        clipIdCounter: nextClipId,
+      }));
+    } catch (err: any) {
+      set({ projectError: `Subtitle generation failed: ${err.message}` });
+    } finally {
+      unsub();
+      set({ isGeneratingSubtitles: false, subtitleProgress: '' });
     }
   },
 

@@ -94,6 +94,18 @@ function buildResolutionPresets(w: number, h: number) {
   });
 }
 
+function SubtitleProgressBanner() {
+  const isGenerating = useEditorStore((s) => s.isGeneratingSubtitles);
+  const progress = useEditorStore((s) => s.subtitleProgress);
+  if (!isGenerating) return null;
+  return (
+    <div className="subtitle-progress-banner">
+      <span className="subtitle-progress-spinner" />
+      <span>Generating subtitles: {progress || 'Starting...'}</span>
+    </div>
+  );
+}
+
 const FPS_PRESETS = [24, 30, 60];
 
 const QUALITY_PRESETS = [
@@ -417,6 +429,8 @@ export default function App() {
           </div>
         </div>
       )}
+
+      <SubtitleProgressBanner />
 
       <ApiKeysModal />
 

@@ -29,7 +29,7 @@ function findSnapTarget(raw: number, candidates: number[], threshold: number): n
 }
 
 export default memo(function TimelineClip({ clip, zoom, isSelected }: TimelineClipProps) {
-  const { selectClip, removeClip, updateClip } = useEditorStore();
+  const { selectClip, removeClip, updateClip, generateSubtitles } = useEditorStore();
   const tracks = useEditorStore((s) => s.tracks);
   const mediaFiles = useEditorStore((s) => s.mediaFiles);
   const timelineClips = useEditorStore((s) => s.timelineClips);
@@ -246,19 +246,26 @@ export default memo(function TimelineClip({ clip, zoom, isSelected }: TimelineCl
       e.preventDefault();
       e.stopPropagation();
       selectClip(clip.id);
+      const items: ContextMenuItem[] = [];
+      if (mediaType === 'video' || mediaType === 'audio') {
+        items.push({
+          label: 'Generate Subtitles',
+          action: () => generateSubtitles(clip.id),
+        });
+        items.push({ divider: true });
+      }
+      items.push({
+        label: 'Remove Clip',
+        danger: true,
+        action: () => removeClip(clip.id),
+      });
       setContextMenu({
         x: e.clientX,
         y: e.clientY,
-        items: [
-          {
-            label: 'Remove Clip',
-            danger: true,
-            action: () => removeClip(clip.id),
-          },
-        ],
+        items,
       });
     },
-    [clip.id, selectClip, removeClip]
+    [clip.id, selectClip, removeClip, generateSubtitles, mediaType]
   );
 
   const left = clip.startTime * zoom;

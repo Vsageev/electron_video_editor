@@ -67,10 +67,12 @@ src/
 - Validation code must be defensive against malformed arrays (e.g. `mediaFiles` containing `null` entries) since projects can be edited externally; avoid `.map(x => x.prop)` without null checks.
 - UI numeric formatting must be defensive for externally edited projects; never call `.toFixed()` on raw clip/keyframe fields without finite-number guards/fallbacks.
 - Component `componentProps` media references must be normalized with project path conversions: store project-relative in `project.json`, resolve to absolute on load (including nested `key:props` media refs).
+- Some Python installs expose `rembg` as a console script without `rembg.__main__`; avoid invoking background removal with `python -m rembg` and prefer calling `rembg.bg.remove` (or the `rembg` CLI binary) directly.
 - User-authored component loading must avoid `eval`/`new Function` (blocked by Electron CSP). Components are bundled as ESM and loaded via `import(blob:...)` in `src/utils/componentLoader.ts`, so `index.html` `script-src` must allow `blob:`.
 - On Windows, Electron `dialog.showOpenDialog()` defaults to the first `filters` entry; put a combined "All Supported" filter first to avoid forcing users to switch the Explorer file-type dropdown.
 - Global runtime errors should flow through the existing `projectError` banner in renderer code; avoid adding separate one-off fatal error UIs unless the app cannot render at all.
 - Handle all foreseeable runtime failures gracefully (safe fallbacks, guarded access, recoverable UI states) instead of throwing/crashing the renderer.
+- **Long-running subprocess UX rule**: Any IPC call that spawns a child process (rembg, ffmpeg, transcription, etc.) must: (1) stream progress/stage events to the renderer via `webContents.send` so the UI can show what's happening, (2) display elapsed time in the UI so users know the operation hasn't hung, (3) provide a cancel mechanism (kill the child process via a separate IPC handler), and (4) handle the `cancelled` result gracefully (no error banner). Never leave the user staring at an indeterminate spinner with no way to cancel or verify the process is alive. Use `spawn` (not `execFile`) for long-running processes so stdout/stderr can be streamed.
 
 ## Commands
 

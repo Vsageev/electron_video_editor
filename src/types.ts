@@ -168,6 +168,18 @@ declare global {
       listBuiltinComponents: () => Promise<{ name: string; fileName: string }[]>;
       addBuiltinComponent: (projectName: string, fileName: string) => Promise<{ success: boolean; sourcePath?: string; bundlePath?: string; error?: string }>;
 
+      // Tools
+      checkRembg: () => Promise<{ hasPython: boolean; hasRembg: boolean }>;
+      installRembg: () => Promise<{ success: boolean; error?: string; log?: string }>;
+      onRembgInstallLog: (callback: (log: string) => void) => () => void;
+      removeBackground: (projectName: string, relativePath: string) => Promise<{ success: boolean; relativePath?: string; error?: string }>;
+      cancelRemoveBackground: () => Promise<{ success: boolean }>;
+      onRembgProgress: (callback: (stage: string) => void) => () => void;
+
+      // Audio transcription
+      transcribeAudio: (projectName: string, relativePath: string) => Promise<{ success: boolean; segments?: { start: number; end: number; text: string }[]; error?: string }>;
+      onTranscribeProgress: (callback: (msg: string) => void) => () => void;
+
       // Project file watching
       watchProject: (name: string) => Promise<void>;
       unwatchProject: () => Promise<void>;

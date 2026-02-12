@@ -37,6 +37,32 @@ contextBridge.exposeInMainWorld('api', {
   addBuiltinComponent: (projectName, fileName) =>
     ipcRenderer.invoke('add-builtin-component', projectName, fileName),
 
+  // Tools
+  checkRembg: () => ipcRenderer.invoke('check-rembg'),
+  installRembg: () => ipcRenderer.invoke('install-rembg'),
+  onRembgInstallLog: (callback) => {
+    const handler = (_evt, log) => callback(log);
+    ipcRenderer.on('rembg-install-log', handler);
+    return () => ipcRenderer.removeListener('rembg-install-log', handler);
+  },
+  removeBackground: (projectName, relativePath) =>
+    ipcRenderer.invoke('remove-background', projectName, relativePath),
+  cancelRemoveBackground: () => ipcRenderer.invoke('cancel-remove-background'),
+  onRembgProgress: (callback) => {
+    const handler = (_evt, stage) => callback(stage);
+    ipcRenderer.on('rembg-progress', handler);
+    return () => ipcRenderer.removeListener('rembg-progress', handler);
+  },
+
+  // Audio transcription
+  transcribeAudio: (projectName, relativePath) =>
+    ipcRenderer.invoke('transcribe-audio', projectName, relativePath),
+  onTranscribeProgress: (callback) => {
+    const handler = (_evt, msg) => callback(msg);
+    ipcRenderer.on('transcribe-progress', handler);
+    return () => ipcRenderer.removeListener('transcribe-progress', handler);
+  },
+
   // Project file watching
   watchProject: (name) => ipcRenderer.invoke('watch-project', name),
   unwatchProject: () => ipcRenderer.invoke('unwatch-project'),

@@ -307,7 +307,7 @@ export default function Timeline() {
           <div className="playhead-line" />
         </div>
 
-        <div className="timeline-tracks-scroll">
+        <div className="timeline-tracks-scroll" style={{ minWidth: containerWidth }}>
           {/* Dynamic Tracks */}
           {tracks.map((trackId, index) => (
             <div className="track" key={trackId}>
