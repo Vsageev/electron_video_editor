@@ -60,6 +60,8 @@ src/
 - Never use a single `<video>` element for multi-clip compositing — need one per visible clip.
 - Guard against feedback loops between video `timeupdate` events and `currentTime` store sync.
 - `hasSource` checks on video refs during render are fragile due to stale ref reads.
+- Keep export compositing order aligned with preview (`tracks`-based stacking), not media-type buckets, or output layering will differ.
+- Component clip export must resolve `propDefinitions` `media` props the same way preview does (video/image elements, component refs, `key:props` child props), otherwise component renders can fail during rasterization.
 - `updateClip()` enforces no-overlap placement invariants for `track`/`startTime`/`duration`; use it for timeline placement changes rather than mutating clip arrays directly.
 - IPC `deleteMediaFromProject(projectName, relativePath)` expects a project-relative path (e.g. `media/foo.mp4`), not an absolute path; convert via `projectDir` before calling. Component media may also have a `bundlePath` that should be deleted too.
 - Removing a media file must also clean any `componentProps` values (for `type: 'media'` propDefinitions) that reference that media path; set them to `''` to keep project JSON references valid.

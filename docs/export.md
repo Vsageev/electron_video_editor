@@ -15,7 +15,7 @@ WebM (VP9 video + Opus audio).
 ## Pipeline
 
 1. Load all video/image elements and bundle components.
-2. Render each frame to an offscreen canvas (video → image → component layer order).
+2. Render each frame to an offscreen canvas in timeline track stack order (same compositing order as preview).
 3. Apply per-clip transforms and masks.
 4. Encode frames with VideoEncoder (VP9).
 5. Mix and encode audio offline with AudioEncoder (Opus).

@@ -53,11 +53,13 @@ const VideoRenderer = memo(function VideoRenderer({
   clip,
   globalTime,
   isPlaying,
+  onNaturalSize,
   onSelect,
 }: {
   clip: TimelineClip;
   globalTime: number;
   isPlaying: boolean;
+  onNaturalSize: (id: number, w: number, h: number) => void;
   onSelect: (id: number, e?: { ctrlKey?: boolean; metaKey?: boolean }) => void;
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -67,9 +69,10 @@ const VideoRenderer = memo(function VideoRenderer({
   const handleMetadata = useCallback(() => {
     const v = videoRef.current;
     if (!v) return;
+    onNaturalSize(clip.id, v.videoWidth, v.videoHeight);
     v.currentTime = Math.max(0, localTime);
     if (isPlaying) v.play().catch(() => {});
-  }, [localTime, isPlaying]);
+  }, [clip.id, localTime, isPlaying, onNaturalSize]);
 
   useEffect(() => {
     const v = videoRef.current;
@@ -109,6 +112,50 @@ const VideoRenderer = memo(function VideoRenderer({
 // ---------------------------------------------------------------------------
 // ComponentRenderer — renders user-authored TSX component
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// ChildVideoRenderer — timeline-synced video for component media props
+// ---------------------------------------------------------------------------
+
+function ChildVideoRenderer({ src, clipCurrentTime }: { src: string; clipCurrentTime: number }) {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const isPlaying = useEditorStore((s) => s.isPlaying);
+
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v || v.readyState < 1) return;
+    if (isPlaying) v.play().catch(() => {});
+    else v.pause();
+  }, [isPlaying]);
+
+  useEffect(() => {
+    if (isPlaying) return;
+    const v = videoRef.current;
+    if (!v || v.readyState < 1) return;
+    const target = Math.max(0, clipCurrentTime);
+    if (Math.abs(v.currentTime - target) > 0.04) {
+      v.currentTime = target;
+    }
+  }, [clipCurrentTime, isPlaying]);
+
+  const handleMetadata = useCallback(() => {
+    const v = videoRef.current;
+    if (!v) return;
+    v.currentTime = Math.max(0, clipCurrentTime);
+    if (isPlaying) v.play().catch(() => {});
+  }, [clipCurrentTime, isPlaying]);
+
+  return (
+    <video
+      ref={videoRef}
+      src={src}
+      style={{ width: '100%', height: '100%', objectFit: 'contain' }}
+      preload="auto"
+      onLoadedMetadata={handleMetadata}
+      playsInline
+    />
+  );
+}
 
 // ---------------------------------------------------------------------------
 // ChildComponentRenderer — renders a component referenced by a 'component' prop
@@ -165,10 +212,9 @@ function useResolvedComponentProps(
         );
       } else if (media.type === 'video') {
         resolved[key] = (
-          <video
+          <ChildVideoRenderer
             src={filePathToFileUrl(media.path)}
-            style={{ width: '100%', height: '100%', objectFit: 'contain' }}
-            autoPlay muted loop playsInline preload="auto"
+            clipCurrentTime={clipProps.currentTime}
           />
         );
       } else if (media.type === 'image') {
@@ -189,6 +235,13 @@ function useResolvedComponentProps(
   }, [componentProps, propDefinitions, mediaFiles, clipProps]);
 }
 
+// Fixed logical base width for component rendering.  Components are always
+// rendered at this CSS-pixel width (height derived from export aspect ratio)
+// and CSS-scaled to fit the preview container.  This ensures CSS pixel values
+// (padding, font-size, border, etc.) look identical regardless of window size
+// and match the export output.
+const COMPONENT_LOGICAL_BASE = 960;
+
 const ComponentRenderer = memo(function ComponentRenderer({
   clip,
   mediaFile,
@@ -207,6 +260,7 @@ const ComponentRenderer = memo(function ComponentRenderer({
   const [UserComponent, setUserComponent] = useState<React.ComponentType<ComponentClipProps> | null>(null);
   const [parentPropDefs, setParentPropDefs] = useState<Record<string, PropDefinition> | undefined>(undefined);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const exportSettings = useEditorStore((s) => s.exportSettings);
 
   useEffect(() => {
     if (!mediaFile.bundlePath) {
@@ -233,13 +287,23 @@ const ComponentRenderer = memo(function ComponentRenderer({
   const currentTime = globalTime - clip.startTime;
   const progress = clip.duration > 0 ? currentTime / clip.duration : 0;
 
+  // Compute fixed logical dimensions so the component always renders at the
+  // same CSS-pixel size.  Preview visually scales via CSS transform.
+  const { logicalW, logicalH, cssScale } = useMemo(() => {
+    const aspect = exportSettings.width / exportSettings.height;
+    const lw = COMPONENT_LOGICAL_BASE;
+    const lh = COMPONENT_LOGICAL_BASE / aspect;
+    const s = containerW > 0 ? containerW / lw : 1;
+    return { logicalW: lw, logicalH: lh, cssScale: s };
+  }, [exportSettings.width, exportSettings.height, containerW]);
+
   const clipProps: ComponentClipProps = useMemo(() => ({
     currentTime,
     duration: clip.duration,
-    width: containerW,
-    height: containerH,
+    width: logicalW,
+    height: logicalH,
     progress,
-  }), [currentTime, clip.duration, containerW, containerH, progress]);
+  }), [currentTime, clip.duration, logicalW, logicalH, progress]);
 
   const resolvedProps = useResolvedComponentProps(clip.componentProps, parentPropDefs, clipProps);
 
@@ -271,13 +335,23 @@ const ComponentRenderer = memo(function ComponentRenderer({
   }
 
   return (
-    <div style={{ width: '100%', height: '100%', cursor: 'pointer' }} onMouseDown={handleClick}>
-      <ComponentErrorBoundary clipId={clip.id}>
-        <UserComponent
-          {...clipProps}
-          {...resolvedProps}
-        />
-      </ComponentErrorBoundary>
+    <div
+      style={{ width: '100%', height: '100%', overflow: 'hidden', cursor: 'pointer' }}
+      onMouseDown={handleClick}
+    >
+      <div style={{
+        width: logicalW,
+        height: logicalH,
+        transform: `scale(${cssScale})`,
+        transformOrigin: 'top left',
+      }}>
+        <ComponentErrorBoundary clipId={clip.id}>
+          <UserComponent
+            {...clipProps}
+            {...resolvedProps}
+          />
+        </ComponentErrorBoundary>
+      </div>
     </div>
   );
 });
@@ -379,16 +453,6 @@ export default memo(function ClipLayer({
 }: ClipLayerProps) {
   const mediaType = mediaFile?.type ?? 'video';
 
-  // For video clips, track natural size via a separate ref callback
-  const videoWrapperRef = useRef<HTMLVideoElement | null>(null);
-
-  const handleVideoMetadata = useCallback(() => {
-    const v = videoWrapperRef.current;
-    if (v) {
-      onNaturalSize(clip.id, v.videoWidth, v.videoHeight);
-    }
-  }, [clip.id, onNaturalSize]);
-
   // For component/audio clips, report container size as natural size
   // (image clips report natural size via onLoad in ImageRenderer)
   useEffect(() => {
@@ -430,6 +494,7 @@ export default memo(function ClipLayer({
       clip={clip}
       globalTime={globalTime}
       isPlaying={isPlaying}
+      onNaturalSize={onNaturalSize}
       onSelect={onSelect}
     />
   );

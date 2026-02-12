@@ -236,6 +236,7 @@ export default function App() {
         abort.signal,
         bitrate,
         useEditorStore.getState().mediaFiles,
+        useEditorStore.getState().tracks,
       );
 
       if (!abort.signal.aborted) {

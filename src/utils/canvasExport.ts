@@ -1,7 +1,8 @@
 import { Muxer, ArrayBufferTarget } from 'webm-muxer';
-import type { TimelineClip, MediaFile } from '../types';
+import type { TimelineClip, MediaFile, ComponentClipProps, PropDefinition } from '../types';
 import { getAnimatedTransform, getAnimatedMask } from './keyframeEngine';
 import { loadComponent } from './componentLoader';
+import { filePathToFileUrl } from './fileUrl';
 import { toCanvas } from 'html-to-image';
 import React from 'react';
 import { createRoot } from 'react-dom/client';
@@ -51,6 +52,167 @@ function loadImage(src: string): Promise<HTMLImageElement> {
   });
 }
 
+/** Seek a video to the given time and draw the current frame to a data URL. */
+async function captureVideoFrame(video: HTMLVideoElement, time: number): Promise<string> {
+  await waitForSeek(video, Math.max(0, time));
+  const c = document.createElement('canvas');
+  c.width = video.videoWidth || 640;
+  c.height = video.videoHeight || 360;
+  const ctx = c.getContext('2d')!;
+  ctx.drawImage(video, 0, 0, c.width, c.height);
+  return c.toDataURL('image/png');
+}
+
+function drawMaskShapePath(
+  ctx: CanvasRenderingContext2D,
+  drawX: number,
+  drawY: number,
+  drawW: number,
+  drawH: number,
+  mask: NonNullable<ReturnType<typeof getAnimatedMask>>,
+) {
+  const mcx = drawX + mask.centerX * drawW;
+  const mcy = drawY + mask.centerY * drawH;
+  const mw = (mask.width / 2) * drawW;
+  const mh = (mask.height / 2) * drawH;
+  if (mask.shape === 'ellipse') {
+    ctx.ellipse(mcx, mcy, mw, mh, 0, 0, Math.PI * 2);
+    return;
+  }
+
+  const rx = mask.borderRadius * Math.min(mw, mh) * 2;
+  if (rx > 0) {
+    const lx = mcx - mw;
+    const ly = mcy - mh;
+    const rw = mw * 2;
+    const rh = mh * 2;
+    ctx.moveTo(lx + rx, ly);
+    ctx.lineTo(lx + rw - rx, ly);
+    ctx.arcTo(lx + rw, ly, lx + rw, ly + rx, rx);
+    ctx.lineTo(lx + rw, ly + rh - rx);
+    ctx.arcTo(lx + rw, ly + rh, lx + rw - rx, ly + rh, rx);
+    ctx.lineTo(lx + rx, ly + rh);
+    ctx.arcTo(lx, ly + rh, lx, ly + rh - rx, rx);
+    ctx.lineTo(lx, ly + rx);
+    ctx.arcTo(lx, ly, lx + rx, ly, rx);
+    ctx.closePath();
+    return;
+  }
+
+  ctx.rect(mcx - mw, mcy - mh, mw * 2, mh * 2);
+}
+
+function withTransformAndMask(
+  ctx: CanvasRenderingContext2D,
+  drawX: number,
+  drawY: number,
+  drawW: number,
+  drawH: number,
+  rotation: number,
+  mask: NonNullable<ReturnType<typeof getAnimatedMask>> | null,
+  draw: () => void,
+) {
+  const hasRotation = rotation !== 0;
+  if (hasRotation) {
+    ctx.save();
+    ctx.translate(drawX + drawW / 2, drawY + drawH / 2);
+    ctx.rotate((rotation * Math.PI) / 180);
+    ctx.translate(-(drawX + drawW / 2), -(drawY + drawH / 2));
+  }
+
+  if (mask) {
+    ctx.save();
+    ctx.beginPath();
+    if (mask.invert) {
+      ctx.rect(drawX, drawY, drawW, drawH);
+    }
+    drawMaskShapePath(ctx, drawX, drawY, drawW, drawH, mask);
+    ctx.clip(mask.invert ? 'evenodd' : 'nonzero');
+  }
+
+  const prevFilter = ctx.filter;
+  if (mask && mask.feather > 0) {
+    ctx.filter = `blur(${mask.feather}px)`;
+  }
+  draw();
+  ctx.filter = prevFilter;
+
+  if (mask) {
+    ctx.restore();
+  }
+  if (hasRotation) {
+    ctx.restore();
+  }
+}
+
+type ComponentEntry = {
+  Component: React.ComponentType<any>;
+  propDefinitions?: Record<string, PropDefinition>;
+};
+
+export function resolveComponentPropsForExport(
+  componentProps: Record<string, any> | undefined,
+  propDefinitions: Record<string, PropDefinition> | undefined,
+  clipProps: ComponentClipProps,
+  mediaByPath: Map<string, MediaFile>,
+  componentEntriesByMediaPath: Map<string, ComponentEntry>,
+  videoFrameUrls?: Map<string, string>,
+): Record<string, any> {
+  if (!componentProps || !propDefinitions) return componentProps || {};
+
+  const resolved: Record<string, any> = { ...componentProps };
+
+  for (const [key, def] of Object.entries(propDefinitions)) {
+    if (def.type !== 'media') continue;
+    const path = componentProps[key];
+    const nestedPropsKey = `${key}:props`;
+    if (!path) {
+      delete resolved[nestedPropsKey];
+      continue;
+    }
+
+    const media = mediaByPath.get(path);
+    if (!media) {
+      delete resolved[nestedPropsKey];
+      continue;
+    }
+
+    if (media.type === 'component') {
+      const childEntry = componentEntriesByMediaPath.get(media.path);
+      if (childEntry) {
+        const childProps = componentProps[nestedPropsKey] as Record<string, any> | undefined;
+        resolved[key] = React.createElement(childEntry.Component, {
+          ...clipProps,
+          ...(childProps || {}),
+        });
+      } else {
+        resolved[key] = null;
+      }
+    } else if (media.type === 'video') {
+      // Use pre-captured frame data URL so html-to-image can rasterize it
+      // (html-to-image cannot reliably capture <video> elements)
+      const frameUrl = videoFrameUrls?.get(media.path);
+      resolved[key] = React.createElement('img', {
+        src: frameUrl || filePathToFileUrl(media.path),
+        style: { width: '100%', height: '100%', objectFit: 'contain' },
+        draggable: false,
+      });
+    } else if (media.type === 'image') {
+      resolved[key] = React.createElement('img', {
+        src: filePathToFileUrl(media.path),
+        style: { width: '100%', height: '100%', objectFit: 'contain' },
+        draggable: false,
+      });
+    } else {
+      resolved[key] = null;
+    }
+
+    delete resolved[nestedPropsKey];
+  }
+
+  return resolved;
+}
+
 export async function exportToVideo(
   clips: TimelineClip[],
   width: number,
@@ -60,15 +222,31 @@ export async function exportToVideo(
   abortSignal: AbortSignal,
   bitrate: number = 8_000_000,
   mediaFiles: MediaFile[] = [],
+  tracks: number[] = [],
 ): Promise<Blob> {
+  const mediaByPath = new Map(mediaFiles.map((m) => [m.path, m]));
   const getMediaType = (clip: TimelineClip) => {
-    const mf = mediaFiles.find((m) => m.path === clip.mediaPath);
+    const mf = mediaByPath.get(clip.mediaPath);
     return mf?.type ?? 'video';
   };
 
-  const videoClips = clips.filter((c) => getMediaType(c) === 'video');
-  const componentClips = clips.filter((c) => getMediaType(c) === 'component');
-  const imageClips = clips.filter((c) => getMediaType(c) === 'image');
+  const renderableClips = clips.filter((c) => {
+    const t = getMediaType(c);
+    return t === 'video' || t === 'image' || t === 'component';
+  });
+  const videoClips = renderableClips.filter((c) => getMediaType(c) === 'video');
+  const componentClips = renderableClips.filter((c) => getMediaType(c) === 'component');
+  const imageClips = renderableClips.filter((c) => getMediaType(c) === 'image');
+
+  const trackOrder = tracks.length > 0
+    ? tracks
+    : Array.from(new Set(clips.map((c) => c.track))).sort((a, b) => a - b);
+  const trackOrderMap = new Map(trackOrder.map((track, idx) => [track, idx]));
+  const sortedRenderableClips = [...renderableClips].sort((a, b) => {
+    const ai = trackOrderMap.get(a.track) ?? Number.MAX_SAFE_INTEGER;
+    const bi = trackOrderMap.get(b.track) ?? Number.MAX_SAFE_INTEGER;
+    return bi - ai;
+  });
 
   if (videoClips.length === 0 && componentClips.length === 0 && imageClips.length === 0) {
     throw new Error('No video, image, or component clips to export');
@@ -88,7 +266,7 @@ export async function exportToVideo(
   const videoElements: Map<number, HTMLVideoElement> = new Map();
   await Promise.all(
     videoClips.map(async (clip) => {
-      const video = await loadVideo(`file://${clip.mediaPath}`);
+      const video = await loadVideo(filePathToFileUrl(clip.mediaPath));
       videoElements.set(clip.id, video);
     }),
   );
@@ -97,30 +275,76 @@ export async function exportToVideo(
   const imageElements: Map<number, HTMLImageElement> = new Map();
   await Promise.all(
     imageClips.map(async (clip) => {
-      const img = await loadImage(`file://${clip.mediaPath}`);
+      const img = await loadImage(filePathToFileUrl(clip.mediaPath));
       imageElements.set(clip.id, img);
     }),
   );
 
   // Load component bundles
-  const componentRenderers: Map<number, React.ComponentType<any>> = new Map();
+  const componentEntriesByMediaPath: Map<string, ComponentEntry> = new Map();
+  await Promise.all(
+    mediaFiles
+      .filter((m) => m.type === 'component' && !!m.bundlePath)
+      .map(async (m) => {
+        try {
+          const entry = await loadComponent(m.bundlePath!);
+          componentEntriesByMediaPath.set(m.path, {
+            Component: entry.Component,
+            propDefinitions: entry.propDefinitions,
+          });
+        } catch (e) {
+          console.warn(`Could not load component media ${m.name}:`, e);
+        }
+      }),
+  );
+
+  const componentEntriesByClipId: Map<number, ComponentEntry> = new Map();
   for (const clip of componentClips) {
-    const mf = mediaFiles.find((m) => m.path === clip.mediaPath);
-    if (mf?.bundlePath) {
-      try {
-        const entry = await loadComponent(mf.bundlePath);
-        componentRenderers.set(clip.id, entry.Component);
-      } catch (e) {
-        console.warn(`Could not load component for ${clip.mediaName}:`, e);
+    const entry = componentEntriesByMediaPath.get(clip.mediaPath);
+    if (entry) {
+      componentEntriesByClipId.set(clip.id, entry);
+    } else {
+      console.warn(`Component clip ${clip.mediaName} has no loaded component entry`);
+    }
+  }
+
+  // Pre-load videos referenced as media props inside component clips
+  // so we can seek + capture frames per-frame instead of using <video> elements
+  // (html-to-image cannot reliably rasterize <video>).
+  const mediaPropVideos: Map<string, HTMLVideoElement> = new Map();
+  for (const clip of componentClips) {
+    const entry = componentEntriesByClipId.get(clip.id);
+    if (!entry?.propDefinitions || !clip.componentProps) continue;
+    for (const [key, def] of Object.entries(entry.propDefinitions)) {
+      if (def.type !== 'media') continue;
+      const path = clip.componentProps[key];
+      if (!path || mediaPropVideos.has(path)) continue;
+      const media = mediaByPath.get(path);
+      if (media?.type === 'video') {
+        try {
+          const video = await loadVideo(filePathToFileUrl(media.path));
+          mediaPropVideos.set(path, video);
+        } catch (e) {
+          console.warn(`Could not load media-prop video ${path}:`, e);
+        }
       }
     }
   }
 
-  // Hidden offscreen container for component rasterization
+  // Offscreen container for component rasterization.
+  // The outer wrapper is invisible (opacity:0) but still painted by the browser,
+  // so html-to-image can read accurate computed styles on the inner content.
+  // opacity on the parent does NOT propagate to the cloned node's inline styles.
   const offscreenDiv = document.createElement('div');
-  offscreenDiv.style.cssText = `position:fixed;left:-9999px;top:-9999px;width:${width}px;height:${height}px;overflow:hidden;`;
+  offscreenDiv.style.cssText = `position:fixed;left:0;top:0;pointer-events:none;opacity:0;`;
   document.body.appendChild(offscreenDiv);
-  const offscreenRoot = createRoot(offscreenDiv);
+  // Inner content div — the rasterization target, sized per-frame.
+  // Mirrors the preview's CSS context (.canvas-rect): position:relative, overflow:hidden,
+  // box-sizing:border-box so layout matches what the user sees in the preview panel.
+  const offscreenContent = document.createElement('div');
+  offscreenContent.style.cssText = `position:relative;margin:0;padding:0;box-sizing:border-box;overflow:hidden;background:#000;`;
+  offscreenDiv.appendChild(offscreenContent);
+  const offscreenRoot = createRoot(offscreenContent);
 
   // Set up muxer with video + audio
   const hasAudio = true;
@@ -170,11 +394,15 @@ export async function exportToVideo(
     ctx.fillStyle = '#000000';
     ctx.fillRect(0, 0, width, height);
 
-    // Draw each visible clip
-    for (const clip of videoClips) {
+    // Draw each visible clip in the same track stack order as preview.
+    for (const clip of sortedRenderableClips) {
       const clipEnd = clip.startTime + clip.duration;
+      if (timelineTime < clip.startTime || timelineTime >= clipEnd) {
+        continue;
+      }
 
-      if (timelineTime >= clip.startTime && timelineTime < clipEnd) {
+      const mediaType = getMediaType(clip);
+      if (mediaType === 'video') {
         const clipLocalTime = clip.trimStart + (timelineTime - clip.startTime);
         const video = videoElements.get(clip.id)!;
 
@@ -189,61 +417,14 @@ export async function exportToVideo(
         const scaledH = base.h * scale * scaleY;
         const drawX = (width - scaledW) / 2 + x * base.w;
         const drawY = (height - scaledH) / 2 + y * base.h;
-
-        const needsRotation = rotation !== 0;
-        if (needsRotation) {
-          ctx.save();
-          ctx.translate(drawX + scaledW / 2, drawY + scaledH / 2);
-          ctx.rotate((rotation * Math.PI) / 180);
-          ctx.translate(-(drawX + scaledW / 2), -(drawY + scaledH / 2));
-        }
-
         const mask = getAnimatedMask(clip, animTime);
-        if (mask) {
-          ctx.save();
-          const mcx = drawX + mask.centerX * scaledW;
-          const mcy = drawY + mask.centerY * scaledH;
-          const mw = (mask.width / 2) * scaledW;
-          const mh = (mask.height / 2) * scaledH;
-          ctx.beginPath();
-          if (mask.shape === 'ellipse') {
-            ctx.ellipse(mcx, mcy, mw, mh, 0, 0, Math.PI * 2);
-          } else {
-            const rx = mask.borderRadius * Math.min(mw, mh) * 2;
-            if (rx > 0) {
-              const lx = mcx - mw, ly = mcy - mh, rw = mw * 2, rh = mh * 2;
-              ctx.moveTo(lx + rx, ly);
-              ctx.lineTo(lx + rw - rx, ly);
-              ctx.arcTo(lx + rw, ly, lx + rw, ly + rx, rx);
-              ctx.lineTo(lx + rw, ly + rh - rx);
-              ctx.arcTo(lx + rw, ly + rh, lx + rw - rx, ly + rh, rx);
-              ctx.lineTo(lx + rx, ly + rh);
-              ctx.arcTo(lx, ly + rh, lx, ly + rh - rx, rx);
-              ctx.lineTo(lx, ly + rx);
-              ctx.arcTo(lx, ly, lx + rx, ly, rx);
-              ctx.closePath();
-            } else {
-              ctx.rect(mcx - mw, mcy - mh, mw * 2, mh * 2);
-            }
-          }
-          ctx.clip();
-        }
-
-        ctx.drawImage(video, drawX, drawY, scaledW, scaledH);
-
-        if (mask) {
-          ctx.restore();
-        }
-        if (needsRotation) {
-          ctx.restore();
-        }
+        withTransformAndMask(ctx, drawX, drawY, scaledW, scaledH, rotation, mask, () => {
+          ctx.drawImage(video, drawX, drawY, scaledW, scaledH);
+        });
+        continue;
       }
-    }
 
-    // Draw image clips
-    for (const clip of imageClips) {
-      const clipEnd = clip.startTime + clip.duration;
-      if (timelineTime >= clip.startTime && timelineTime < clipEnd) {
+      if (mediaType === 'image') {
         const img = imageElements.get(clip.id)!;
         const nw = img.naturalWidth;
         const nh = img.naturalHeight;
@@ -254,63 +435,17 @@ export async function exportToVideo(
         const scaledH = base.h * scale * scaleY;
         const drawX = (width - scaledW) / 2 + x * base.w;
         const drawY = (height - scaledH) / 2 + y * base.h;
-
-        const needsRotation = rotation !== 0;
-        if (needsRotation) {
-          ctx.save();
-          ctx.translate(drawX + scaledW / 2, drawY + scaledH / 2);
-          ctx.rotate((rotation * Math.PI) / 180);
-          ctx.translate(-(drawX + scaledW / 2), -(drawY + scaledH / 2));
-        }
-
         const mask = getAnimatedMask(clip, animTime);
-        if (mask) {
-          ctx.save();
-          const mcx = drawX + mask.centerX * scaledW;
-          const mcy = drawY + mask.centerY * scaledH;
-          const mw = (mask.width / 2) * scaledW;
-          const mh = (mask.height / 2) * scaledH;
-          ctx.beginPath();
-          if (mask.shape === 'ellipse') {
-            ctx.ellipse(mcx, mcy, mw, mh, 0, 0, Math.PI * 2);
-          } else {
-            const rx = mask.borderRadius * Math.min(mw, mh) * 2;
-            if (rx > 0) {
-              const lx = mcx - mw, ly = mcy - mh, rw = mw * 2, rh = mh * 2;
-              ctx.moveTo(lx + rx, ly);
-              ctx.lineTo(lx + rw - rx, ly);
-              ctx.arcTo(lx + rw, ly, lx + rw, ly + rx, rx);
-              ctx.lineTo(lx + rw, ly + rh - rx);
-              ctx.arcTo(lx + rw, ly + rh, lx + rw - rx, ly + rh, rx);
-              ctx.lineTo(lx + rx, ly + rh);
-              ctx.arcTo(lx, ly + rh, lx, ly + rh - rx, rx);
-              ctx.lineTo(lx, ly + rx);
-              ctx.arcTo(lx, ly, lx + rx, ly, rx);
-              ctx.closePath();
-            } else {
-              ctx.rect(mcx - mw, mcy - mh, mw * 2, mh * 2);
-            }
-          }
-          ctx.clip();
-        }
-
-        ctx.drawImage(img, drawX, drawY, scaledW, scaledH);
-
-        if (mask) {
-          ctx.restore();
-        }
-        if (needsRotation) {
-          ctx.restore();
-        }
+        withTransformAndMask(ctx, drawX, drawY, scaledW, scaledH, rotation, mask, () => {
+          ctx.drawImage(img, drawX, drawY, scaledW, scaledH);
+        });
+        continue;
       }
-    }
 
-    // Draw component clips
-    for (const clip of componentClips) {
-      const clipEnd = clip.startTime + clip.duration;
-      if (timelineTime >= clip.startTime && timelineTime < clipEnd) {
-        const Component = componentRenderers.get(clip.id);
-        if (!Component) continue;
+      if (mediaType === 'component') {
+        const entry = componentEntriesByClipId.get(clip.id);
+        if (!entry) continue;
+        const Component = entry.Component;
 
         const currentTime = timelineTime - clip.startTime;
         const progress = clip.duration > 0 ? currentTime / clip.duration : 0;
@@ -320,44 +455,83 @@ export async function exportToVideo(
         const scaledH = height * scale * scaleY;
         const drawX = (width - scaledW) / 2 + x * width;
         const drawY = (height - scaledH) / 2 + y * height;
+        const mask = getAnimatedMask(clip, animTime);
 
-        const compNeedsRotation = rotation !== 0;
-        if (compNeedsRotation) {
-          ctx.save();
-          ctx.translate(drawX + scaledW / 2, drawY + scaledH / 2);
-          ctx.rotate((rotation * Math.PI) / 180);
-          ctx.translate(-(drawX + scaledW / 2), -(drawY + scaledH / 2));
+        // Render the component DOM at a fixed logical size (matching the
+        // preview's COMPONENT_LOGICAL_BASE) so that CSS pixel values (padding,
+        // font-size, border, etc.) produce identical proportions in both preview
+        // and export.  html-to-image upscales to export resolution via pixelRatio.
+        const LOGICAL_BASE = 960;
+        const aspect = width / height;
+        const logicalW = LOGICAL_BASE * scale * scaleX;
+        const logicalH = (LOGICAL_BASE / aspect) * scale * scaleY;
+        const renderPixelRatio = scaledW / logicalW;
+
+        const clipProps: ComponentClipProps = {
+          currentTime,
+          duration: clip.duration,
+          width: logicalW,
+          height: logicalH,
+          progress,
+        };
+        // Capture current frame of any video media props as data-URL images
+        const videoFrameUrls = new Map<string, string>();
+        if (entry.propDefinitions && clip.componentProps) {
+          for (const [key, def] of Object.entries(entry.propDefinitions)) {
+            if (def.type !== 'media') continue;
+            const path = clip.componentProps[key];
+            if (!path) continue;
+            const media = mediaByPath.get(path);
+            if (media?.type !== 'video') continue;
+            const video = mediaPropVideos.get(path);
+            if (video) {
+              videoFrameUrls.set(path, await captureVideoFrame(video, currentTime));
+            }
+          }
         }
 
+        const resolvedProps = resolveComponentPropsForExport(
+          clip.componentProps,
+          entry.propDefinitions,
+          clipProps,
+          mediaByPath,
+          componentEntriesByMediaPath,
+          videoFrameUrls,
+        );
+
         try {
+          // Size the content container to the logical (CSS) dimensions
+          offscreenContent.style.width = `${logicalW}px`;
+          offscreenContent.style.height = `${logicalH}px`;
+
+          // Match preview DOM structure: ComponentRenderer wraps in
+          // <div style={{width:'100%',height:'100%'}}> <Component/> </div>
           flushSync(() => {
             offscreenRoot.render(
-              React.createElement('div', { style: { width: scaledW, height: scaledH } },
+              React.createElement('div', { style: { width: '100%', height: '100%' } },
                 React.createElement(Component, {
-                  currentTime,
-                  duration: clip.duration,
-                  width: scaledW,
-                  height: scaledH,
-                  progress,
-                  ...(clip.componentProps || {}),
-                })
-              )
+                  ...clipProps,
+                  ...resolvedProps,
+                }),
+              ),
             );
           });
 
-          const rasterCanvas = await toCanvas(offscreenDiv, {
-            width: scaledW,
-            height: scaledH,
-            canvasWidth: scaledW,
-            canvasHeight: scaledH,
+          // Wait for the browser to paint the rendered content
+          await new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r())));
+
+          // Rasterize at logical size, upscaled to full export resolution via pixelRatio
+          const rasterCanvas = await toCanvas(offscreenContent, {
+            width: logicalW,
+            height: logicalH,
+            pixelRatio: renderPixelRatio,
+            skipAutoScale: true,
           });
-          ctx.drawImage(rasterCanvas, drawX, drawY, scaledW, scaledH);
+          withTransformAndMask(ctx, drawX, drawY, scaledW, scaledH, rotation, mask, () => {
+            ctx.drawImage(rasterCanvas, drawX, drawY, scaledW, scaledH);
+          });
         } catch (e) {
           console.warn(`Component rasterization failed for ${clip.mediaName}:`, e);
-        }
-
-        if (compNeedsRotation) {
-          ctx.restore();
         }
       }
     }
@@ -386,14 +560,40 @@ export async function exportToVideo(
   // Flush remaining video frames
   await videoEncoder.flush();
 
-  // Render audio offline (video + audio clips have audio, component clips don't)
+  // Render audio offline: timeline video/audio clips + videos embedded as
+  // component media props (so child videos inside components are not muted).
   const audioSourceClips = clips.filter((c) => {
     const t = getMediaType(c);
     return t === 'video' || t === 'audio';
   });
-  if (hasAudio && audioSourceClips.length > 0) {
+
+  // Collect audio sources from video media props inside component clips.
+  // These inherit the parent component clip's timeline position.
+  type AudioSource = { mediaPath: string; startTime: number; trimStart: number; duration: number; mediaName: string };
+  const extraAudioSources: AudioSource[] = [];
+  for (const clip of componentClips) {
+    const entry = componentEntriesByClipId.get(clip.id);
+    if (!entry?.propDefinitions || !clip.componentProps) continue;
+    for (const [key, def] of Object.entries(entry.propDefinitions)) {
+      if (def.type !== 'media') continue;
+      const path = clip.componentProps[key];
+      if (!path) continue;
+      const media = mediaByPath.get(path);
+      if (media?.type === 'video') {
+        extraAudioSources.push({
+          mediaPath: media.path,
+          startTime: clip.startTime,
+          trimStart: 0,
+          duration: clip.duration,
+          mediaName: media.name,
+        });
+      }
+    }
+  }
+
+  if (hasAudio && (audioSourceClips.length > 0 || extraAudioSources.length > 0)) {
     try {
-      await renderAudio(audioSourceClips, totalDuration, muxer);
+      await renderAudio(audioSourceClips, totalDuration, muxer, extraAudioSources);
     } catch (e) {
       console.warn('Audio encoding failed, exporting without audio:', e);
     }
@@ -402,8 +602,9 @@ export async function exportToVideo(
   muxer.finalize();
   videoEncoder.close();
 
-  // Clean up video/image elements and offscreen container
+  // Clean up video/image elements, media-prop videos, and offscreen container
   for (const v of videoElements.values()) v.src = '';
+  for (const v of mediaPropVideos.values()) v.src = '';
   for (const img of imageElements.values()) img.src = '';
   offscreenRoot.unmount();
   offscreenDiv.remove();
@@ -418,6 +619,7 @@ async function renderAudio(
   videoClips: TimelineClip[],
   totalDuration: number,
   muxer: Muxer<ArrayBufferTarget>,
+  extraAudioSources: { mediaPath: string; startTime: number; trimStart: number; duration: number; mediaName: string }[] = [],
 ) {
   const sampleRate = 48000;
   const numberOfChannels = 2;
@@ -430,22 +632,31 @@ async function renderAudio(
     sampleRate,
   );
 
-  for (const clip of videoClips) {
+  // Helper to schedule an audio source into the offline context
+  const scheduleAudioSource = async (
+    mediaPath: string, startTime: number, trimStart: number, duration: number, label: string,
+  ) => {
     try {
-      const fileBuffer = await window.api.readFile(clip.mediaPath);
+      const fileBuffer = await window.api.readFile(mediaPath);
       const audioBuffer = await offlineCtx.decodeAudioData(fileBuffer.slice(0));
 
       const source = offlineCtx.createBufferSource();
       source.buffer = audioBuffer;
       source.connect(offlineCtx.destination);
 
-      // Start the source at the clip's timeline position, offset by trimStart
-      const offset = clip.trimStart;
-      const duration = clip.duration;
-      source.start(clip.startTime, offset, duration);
+      source.start(startTime, trimStart, duration);
     } catch (e) {
-      console.warn(`Could not decode audio for ${clip.mediaName}:`, e);
+      console.warn(`Could not decode audio for ${label}:`, e);
     }
+  };
+
+  for (const clip of videoClips) {
+    await scheduleAudioSource(clip.mediaPath, clip.startTime, clip.trimStart, clip.duration, clip.mediaName);
+  }
+
+  // Include audio from videos embedded as component media props
+  for (const src of extraAudioSources) {
+    await scheduleAudioSource(src.mediaPath, src.startTime, src.trimStart, src.duration, src.mediaName);
   }
 
   const renderedBuffer = await offlineCtx.startRendering();
