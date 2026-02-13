@@ -284,7 +284,7 @@ const ComponentRenderer = memo(function ComponentRenderer({
     onSelect(clip.id, e);
   }, [clip.id, onSelect]);
 
-  const currentTime = globalTime - clip.startTime;
+  const currentTime = globalTime - clip.startTime + clip.trimStart;
   const progress = clip.duration > 0 ? currentTime / clip.duration : 0;
 
   // Compute fixed logical dimensions so the component always renders at the

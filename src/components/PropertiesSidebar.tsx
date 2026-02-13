@@ -2,6 +2,7 @@ import { useCallback, useMemo, useState } from 'react';
 import { useEditorStore } from '../store/editorStore';
 import { formatTime } from '../utils/formatTime';
 import { evaluateKeyframes } from '../utils/keyframeEngine';
+import DraggableNumberInput from './DraggableNumberInput';
 import type { AnimatableProp, EasingType, Keyframe, MaskShape, ClipMask, PropDefinition } from '../types';
 
 const MASK_SHAPES: MaskShape[] = ['none', 'rectangle', 'ellipse'];
@@ -302,13 +303,11 @@ export default function PropertiesSidebar() {
             currentValue={animatedValues[prop]}
             clipLocalTime={clipLocalTime}
           />
-          <input
-            className="property-input"
-            type="number"
-            step={step}
-            min={min}
+          <DraggableNumberInput
+            step={parseFloat(step)}
+            min={min !== undefined ? parseFloat(min) : undefined}
             value={displayValue}
-            onChange={(e) => handleChange(prop, e.target.value)}
+            onChange={(v) => handleChange(prop, String(v))}
           />
         </div>
       </div>
@@ -376,14 +375,12 @@ export default function PropertiesSidebar() {
                           />
                         )}
                         {def.type === 'number' && (
-                          <input
-                            className="property-input"
-                            type="number"
+                          <DraggableNumberInput
                             step={def.step ?? 1}
                             min={def.min}
                             max={def.max}
                             value={value}
-                            onChange={(e) => handleComponentPropChange(key, parseFloat(e.target.value) || 0)}
+                            onChange={(v) => handleComponentPropChange(key, v)}
                           />
                         )}
                         {def.type === 'color' && (
@@ -445,9 +442,9 @@ export default function PropertiesSidebar() {
                                     onChange={(e) => handleComponentPropChange(childPropsKey, { ...(childProps || {}), [childKey]: e.target.value })} />
                                 )}
                                 {childDef.type === 'number' && (
-                                  <input className="property-input" type="number"
+                                  <DraggableNumberInput
                                     step={childDef.step ?? 1} min={childDef.min} max={childDef.max} value={childVal}
-                                    onChange={(e) => handleComponentPropChange(childPropsKey, { ...(childProps || {}), [childKey]: parseFloat(e.target.value) || 0 })} />
+                                    onChange={(v) => handleComponentPropChange(childPropsKey, { ...(childProps || {}), [childKey]: v })} />
                                 )}
                                 {childDef.type === 'color' && (
                                   <input type="color" value={childVal}
@@ -479,25 +476,21 @@ export default function PropertiesSidebar() {
               <div className="property-group-title">Timing</div>
               <div className="property-row">
                 <span className="property-label">Start</span>
-                <input
-                  className="property-input"
-                  type="number"
-                  step="0.1"
-                  min="0"
+                <DraggableNumberInput
+                  step={0.1}
+                  min={0}
                   value={formatFixed(clip.startTime, 2)}
-                  onChange={(e) => handleChange('startTime', e.target.value)}
+                  onChange={(v) => handleChange('startTime', String(v))}
                 />
               </div>
               <div className="property-row">
                 <span className="property-label">Duration</span>
                 {clipMedia?.type === 'component' || clipMedia?.type === 'image' ? (
-                  <input
-                    className="property-input"
-                    type="number"
-                    step="0.1"
-                    min="0.1"
+                  <DraggableNumberInput
+                    step={0.1}
+                    min={0.1}
                     value={formatFixed(clip.duration, 2, 0.1)}
-                    onChange={(e) => handleChange('duration', e.target.value)}
+                    onChange={(v) => handleChange('duration', String(v))}
                   />
                 ) : (
                   <span className="property-value">{formatTime(clip.duration)}</span>
@@ -562,14 +555,12 @@ export default function PropertiesSidebar() {
                       {clip.mask.shape === 'rectangle' && (
                         <div className="property-row">
                           <span className="property-label">Radius</span>
-                          <input
-                            className="property-input"
-                            type="number"
-                            step="0.01"
-                            min="0"
-                            max="0.5"
+                          <DraggableNumberInput
+                            step={0.01}
+                            min={0}
+                            max={0.5}
                             value={formatFixed(clip.mask.borderRadius, 2)}
-                            onChange={(e) => handleMaskBorderRadius(parseFloat(e.target.value) || 0)}
+                            onChange={(v) => handleMaskBorderRadius(v)}
                           />
                         </div>
                       )}
@@ -607,29 +598,23 @@ export default function PropertiesSidebar() {
                                 {group.entries.map(({ prop, kf }) => (
                                   <div key={`${prop}-${kf.id}`} className="keyframe-row">
                                     <span className="keyframe-prop-label">{prop.toUpperCase()}</span>
-                                    <input
+                                    <DraggableNumberInput
                                       className="property-input keyframe-time-input"
-                                      type="number"
-                                      step="0.1"
-                                      min="0"
+                                      step={0.1}
+                                      min={0}
                                       value={formatFixed(kf.time, 2)}
                                       title="Time (s)"
-                                      onChange={(e) =>
-                                        updateKeyframe(clip.id, prop, kf.id, {
-                                          time: Math.max(0, parseFloat(e.target.value) || 0),
-                                        })
+                                      onChange={(v) =>
+                                        updateKeyframe(clip.id, prop, kf.id, { time: v })
                                       }
                                     />
-                                    <input
+                                    <DraggableNumberInput
                                       className="property-input keyframe-value-input"
-                                      type="number"
-                                      step={prop === 'scale' ? '0.05' : '0.01'}
+                                      step={prop === 'scale' ? 0.05 : 0.01}
                                       value={formatFixed(kf.value, 2)}
                                       title="Value"
-                                      onChange={(e) =>
-                                        updateKeyframe(clip.id, prop, kf.id, {
-                                          value: parseFloat(e.target.value) || 0,
-                                        })
+                                      onChange={(v) =>
+                                        updateKeyframe(clip.id, prop, kf.id, { value: v })
                                       }
                                     />
                                     <select
@@ -670,24 +655,20 @@ export default function PropertiesSidebar() {
                 <div className="property-group-title">Trim</div>
                 <div className="property-row">
                   <span className="property-label">Trim Start</span>
-                  <input
-                    className="property-input"
-                    type="number"
-                    step="0.1"
-                    min="0"
+                  <DraggableNumberInput
+                    step={0.1}
+                    min={0}
                     value={formatFixed(clip.trimStart, 2)}
-                    onChange={(e) => handleChange('trimStart', e.target.value)}
+                    onChange={(v) => handleChange('trimStart', String(v))}
                   />
                 </div>
                 <div className="property-row">
                   <span className="property-label">Trim End</span>
-                  <input
-                    className="property-input"
-                    type="number"
-                    step="0.1"
-                    min="0"
+                  <DraggableNumberInput
+                    step={0.1}
+                    min={0}
                     value={formatFixed(clip.trimEnd, 2)}
-                    onChange={(e) => handleChange('trimEnd', e.target.value)}
+                    onChange={(v) => handleChange('trimEnd', String(v))}
                   />
                 </div>
               </div>

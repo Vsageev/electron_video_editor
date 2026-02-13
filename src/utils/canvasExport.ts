@@ -88,6 +88,53 @@ function waitForSeek(video: HTMLVideoElement, time: number): Promise<void> {
   });
 }
 
+/** Wait until the video decoder has produced the frame for the current seek
+ *  position.  For detached <video> elements (not in the DOM), the compositor
+ *  may never present a frame, so requestVideoFrameCallback can time out.
+ *  We poll video.readyState as a reliable fallback — HAVE_CURRENT_DATA (2+)
+ *  means the frame at currentTime is decoded and available for capture. */
+function waitForDecodedFrame(video: HTMLVideoElement): Promise<void> {
+  return new Promise((resolve) => {
+    // Fast path: frame already decoded
+    if (video.readyState >= 2) {
+      resolve();
+      return;
+    }
+
+    const anyVideo = video as HTMLVideoElement & {
+      requestVideoFrameCallback?: (cb: () => void) => number;
+      cancelVideoFrameCallback?: (id: number) => void;
+    };
+
+    let settled = false;
+    const settle = () => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    };
+
+    // Try requestVideoFrameCallback (works for DOM-attached videos)
+    let cbId: number | undefined;
+    if (typeof anyVideo.requestVideoFrameCallback === 'function') {
+      cbId = anyVideo.requestVideoFrameCallback(settle);
+    }
+
+    // Poll readyState as fallback — reliable even for detached elements.
+    // Check every 10ms, give up after 500ms (enough for heavy seeks).
+    let elapsed = 0;
+    const poll = setInterval(() => {
+      elapsed += 10;
+      if (video.readyState >= 2 || elapsed >= 500) {
+        clearInterval(poll);
+        if (cbId != null && typeof anyVideo.cancelVideoFrameCallback === 'function') {
+          anyVideo.cancelVideoFrameCallback(cbId);
+        }
+        settle();
+      }
+    }, 10);
+  });
+}
+
 function loadVideo(src: string): Promise<HTMLVideoElement> {
   return new Promise((resolve, reject) => {
     const video = document.createElement('video');
@@ -109,15 +156,61 @@ function loadImage(src: string): Promise<HTMLImageElement> {
   });
 }
 
-/** Seek a video to the given time and draw the current frame to a data URL. */
-async function captureVideoFrame(video: HTMLVideoElement, time: number): Promise<string> {
-  await waitForSeek(video, Math.max(0, time));
-  const c = document.createElement('canvas');
-  c.width = video.videoWidth || 640;
-  c.height = video.videoHeight || 360;
-  const ctx = c.getContext('2d')!;
-  ctx.drawImage(video, 0, 0, c.width, c.height);
-  return c.toDataURL('image/png');
+/** Reusable canvas for video frame capture — avoids per-frame allocation. */
+let _captureCanvas: HTMLCanvasElement | null = null;
+let _captureCtx: CanvasRenderingContext2D | null = null;
+
+/** Seek a video to the given time and extract the current frame as a data URL.
+ *  Uses createImageBitmap to guarantee the decoded frame is ready before drawing,
+ *  avoiding stale-frame issues with direct drawImage after seeked.
+ *  Caps the capture at maxW×maxH to avoid needlessly encoding at native
+ *  resolution (e.g. 4K) when the export is smaller. Uses JPEG instead of PNG
+ *  because JPEG encoding is 5-10× faster for photo-like video content. */
+async function captureVideoFrame(
+  video: HTMLVideoElement,
+  time: number,
+  maxW = 0,
+  maxH = 0,
+): Promise<string> {
+  const target = Math.max(0, time);
+  await waitForSeek(video, target);
+  await waitForDecodedFrame(video);
+
+  // If the seek didn't land close enough (can happen under heavy decode load),
+  // retry once to give the decoder another chance.
+  if (Math.abs(video.currentTime - target) > 0.05) {
+    video.currentTime = target;
+    await waitForSeek(video, target);
+    await waitForDecodedFrame(video);
+  }
+
+  const bitmap = await createImageBitmap(video);
+
+  // Determine output size: cap to maxW×maxH if specified, preserving aspect
+  let outW = bitmap.width;
+  let outH = bitmap.height;
+  if (maxW > 0 && maxH > 0 && (outW > maxW || outH > maxH)) {
+    const aspect = outW / outH;
+    if (aspect > maxW / maxH) {
+      outW = maxW;
+      outH = Math.round(maxW / aspect);
+    } else {
+      outH = maxH;
+      outW = Math.round(maxH * aspect);
+    }
+  }
+
+  if (!_captureCanvas) {
+    _captureCanvas = document.createElement('canvas');
+    _captureCtx = _captureCanvas.getContext('2d')!;
+  }
+  if (_captureCanvas.width !== outW || _captureCanvas.height !== outH) {
+    _captureCanvas.width = outW;
+    _captureCanvas.height = outH;
+  }
+  _captureCtx!.drawImage(bitmap, 0, 0, outW, outH);
+  bitmap.close();
+  return _captureCanvas.toDataURL('image/jpeg', 0.92);
 }
 
 // ---------------------------------------------------------------------------
@@ -133,6 +226,7 @@ export function resolveComponentPropsForExport(
   componentProps: Record<string, any> | undefined,
   propDefinitions: Record<string, PropDefinition> | undefined,
   clipProps: ComponentClipProps,
+  clipId: number | undefined,
   mediaByPath: Map<string, MediaFile>,
   componentEntriesByMediaPath: Map<string, ComponentEntry>,
   videoFrameUrls?: Map<string, string>,
@@ -168,7 +262,8 @@ export function resolveComponentPropsForExport(
         resolved[key] = null;
       }
     } else if (media.type === 'video') {
-      const frameUrl = videoFrameUrls?.get(media.path);
+      const frameUrlKey = clipId != null ? `${clipId}:${key}` : media.path;
+      const frameUrl = videoFrameUrls?.get(frameUrlKey);
       resolved[key] = React.createElement('img', {
         src: frameUrl || filePathToFileUrl(media.path),
         style: { width: '100%', height: '100%', objectFit: 'contain' },
@@ -291,7 +386,8 @@ export async function exportToVideo(
     }
   }
 
-  // Pre-load videos referenced as media props inside component clips
+  // Pre-load videos referenced as media props inside component clips.
+  // Key by clip+prop so each component instance has an independent decode timeline.
   const mediaPropVideos: Map<string, HTMLVideoElement> = new Map();
   for (const clip of componentClips) {
     const entry = componentEntriesByClipId.get(clip.id);
@@ -299,14 +395,15 @@ export async function exportToVideo(
     for (const [key, def] of Object.entries(entry.propDefinitions)) {
       if (def.type !== 'media') continue;
       const path = clip.componentProps[key];
-      if (!path || mediaPropVideos.has(path)) continue;
+      const bindingKey = `${clip.id}:${key}`;
+      if (!path || mediaPropVideos.has(bindingKey)) continue;
       const media = mediaByPath.get(path);
       if (media?.type === 'video') {
         try {
           const video = await loadVideo(filePathToFileUrl(media.path));
-          mediaPropVideos.set(path, video);
+          mediaPropVideos.set(bindingKey, video);
         } catch (e) {
-          console.warn(`Could not load media-prop video ${path}:`, e);
+          console.warn(`Could not load media-prop video ${path} for ${bindingKey}:`, e);
         }
       }
     }
@@ -374,13 +471,14 @@ export async function exportToVideo(
       return timelineTime >= clip.startTime && timelineTime < clipEnd;
     });
 
-    // Capture video frames as data URLs (html-to-image can't rasterize <video>)
+    // Capture video frames as data URLs (html-to-image can't rasterize <video>).
+    // Sequential because captureVideoFrame reuses a shared canvas.
     const videoFrameDataUrls: Map<number, string> = new Map();
     for (const clip of visibleClips) {
       if (getMediaType(clip) !== 'video') continue;
       const video = videoElements.get(clip.id)!;
       const clipLocalTime = clip.trimStart + (timelineTime - clip.startTime);
-      const dataUrl = await captureVideoFrame(video, clipLocalTime);
+      const dataUrl = await captureVideoFrame(video, clipLocalTime, width, height);
       videoFrameDataUrls.set(clip.id, dataUrl);
     }
 
@@ -390,16 +488,17 @@ export async function exportToVideo(
       if (getMediaType(clip) !== 'component') continue;
       const entry = componentEntriesByClipId.get(clip.id);
       if (!entry?.propDefinitions || !clip.componentProps) continue;
-      const currentTime = timelineTime - clip.startTime;
+      const currentTime = clip.trimStart + (timelineTime - clip.startTime);
       for (const [key, def] of Object.entries(entry.propDefinitions)) {
         if (def.type !== 'media') continue;
         const path = clip.componentProps[key];
-        if (!path || mediaPropFrameUrls.has(path)) continue;
+        const bindingKey = `${clip.id}:${key}`;
+        if (!path || mediaPropFrameUrls.has(bindingKey)) continue;
         const media = mediaByPath.get(path);
         if (media?.type !== 'video') continue;
-        const video = mediaPropVideos.get(path);
+        const video = mediaPropVideos.get(bindingKey);
         if (video) {
-          mediaPropFrameUrls.set(path, await captureVideoFrame(video, currentTime));
+          mediaPropFrameUrls.set(bindingKey, await captureVideoFrame(video, currentTime, width, height));
         }
       }
     }
@@ -456,7 +555,7 @@ export async function exportToVideo(
         const entry = componentEntriesByClipId.get(clip.id);
         if (!entry) continue;
 
-        const currentTime = animTime;
+        const currentTime = clip.trimStart + animTime;
         const progress = clip.duration > 0 ? currentTime / clip.duration : 0;
         const containerW = base.w * scale * scaleX;
         const containerH = base.h * scale * scaleY;
@@ -479,6 +578,7 @@ export async function exportToVideo(
           clip.componentProps,
           entry.propDefinitions,
           clipProps,
+          clip.id,
           mediaByPath,
           componentEntriesByMediaPath,
           mediaPropFrameUrls,
@@ -530,6 +630,14 @@ export async function exportToVideo(
 
     // Wait for browser to paint
     await new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r())));
+
+    // Wait for all <img> elements (video frame data URLs) to finish decoding.
+    // Without this, toCanvas may rasterize before images are decoded, producing
+    // blank or stale frames — especially for large data URL images.
+    const imgs = offscreenContent.querySelectorAll('img');
+    if (imgs.length > 0) {
+      await Promise.all(Array.from(imgs).map((img) => img.decode().catch(() => {})));
+    }
 
     // Rasterize the entire composite at export resolution
     const rasterCanvas = await toCanvas(offscreenContent, {
@@ -589,7 +697,7 @@ export async function exportToVideo(
         extraAudioSources.push({
           mediaPath: media.path,
           startTime: clip.startTime,
-          trimStart: 0,
+          trimStart: clip.trimStart,
           duration: clip.duration,
           mediaName: media.name,
         });
@@ -608,11 +716,13 @@ export async function exportToVideo(
   muxer.finalize();
   videoEncoder.close();
 
-  // Clean up video elements, media-prop videos, and offscreen container
+  // Clean up video elements, media-prop videos, offscreen container, and capture canvas
   for (const v of videoElements.values()) v.src = '';
   for (const v of mediaPropVideos.values()) v.src = '';
   offscreenRoot.unmount();
   offscreenDiv.remove();
+  _captureCanvas = null;
+  _captureCtx = null;
 
   onProgress(100);
 

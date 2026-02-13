@@ -196,6 +196,7 @@ export default function MediaSidebar() {
     mediaMetadataLoading,
     loadMediaMetadata,
     saveMediaMetadata,
+    setDraggingMediaIndex,
   } = useEditorStore();
 
   const [contextMenu, setContextMenu] = useState<{
@@ -699,7 +700,9 @@ export default function MediaSidebar() {
               onDragStart={(e) => {
                 e.dataTransfer.setData('application/json', JSON.stringify({ mediaIndex: idx }));
                 e.dataTransfer.effectAllowed = 'copy';
+                setDraggingMediaIndex(idx);
               }}
+              onDragEnd={() => setDraggingMediaIndex(null)}
               onClick={() => handleClick(idx)}
               onDoubleClick={() => handleDoubleClick(media)}
               onContextMenu={(e) => handleContextMenu(e, media, idx)}

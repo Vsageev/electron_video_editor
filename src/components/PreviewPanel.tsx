@@ -113,6 +113,8 @@ export default function PreviewPanel() {
   const updateClip = useEditorStore((s) => s.updateClip);
   const addKeyframe = useEditorStore((s) => s.addKeyframe);
   const updateKeyframe = useEditorStore((s) => s.updateKeyframe);
+  const beginUndoBatch = useEditorStore((s) => s.beginUndoBatch);
+  const endUndoBatch = useEditorStore((s) => s.endUndoBatch);
   const setCurrentTime = useEditorStore((s) => s.setCurrentTime);
   const setIsPlaying = useEditorStore((s) => s.setIsPlaying);
   const setDuration = useEditorStore((s) => s.setDuration);
@@ -398,6 +400,7 @@ export default function PreviewPanel() {
       if (!snap) return;
       const startX = e.clientX;
       const startY = e.clientY;
+      beginUndoBatch();
 
       const onMove = (ev: MouseEvent) => {
         const dx = ev.clientX - startX;
@@ -410,11 +413,12 @@ export default function PreviewPanel() {
       const onUp = () => {
         document.removeEventListener('mousemove', onMove);
         document.removeEventListener('mouseup', onUp);
+        endUndoBatch();
       };
       document.addEventListener('mousemove', onMove);
       document.addEventListener('mouseup', onUp);
     },
-    [selectedClipIds, snapshotSelectedVisible, setTransformProp],
+    [selectedClipIds, snapshotSelectedVisible, setTransformProp, beginUndoBatch, endUndoBatch],
   );
 
   // ---- Transform: corner resize (uniform scale, group-aware) ----
@@ -442,6 +446,7 @@ export default function PreviewPanel() {
           return Math.max(1, maxX - minX);
         })()
       );
+      beginUndoBatch();
 
       const onMove = (ev: MouseEvent) => {
         const dx = ev.clientX - startX;
@@ -464,11 +469,12 @@ export default function PreviewPanel() {
       const onUp = () => {
         document.removeEventListener('mousemove', onMove);
         document.removeEventListener('mouseup', onUp);
+        endUndoBatch();
       };
       document.addEventListener('mousemove', onMove);
       document.addEventListener('mouseup', onUp);
     },
-    [selectedClipIds, snapshotSelectedVisible, setTransformProp, canvasSize],
+    [selectedClipIds, snapshotSelectedVisible, setTransformProp, canvasSize, beginUndoBatch, endUndoBatch],
   );
 
   // ---- Transform: edge resize (non-uniform scaleX / scaleY) — single clip only ----
@@ -491,6 +497,7 @@ export default function PreviewPanel() {
       const id = selectedClip.id;
       const effectiveW = base.w * anim.scale;
       const effectiveH = base.h * anim.scale;
+      beginUndoBatch();
 
       const onMove = (ev: MouseEvent) => {
         const dx = ev.clientX - startX;
@@ -513,11 +520,12 @@ export default function PreviewPanel() {
       const onUp = () => {
         document.removeEventListener('mousemove', onMove);
         document.removeEventListener('mouseup', onUp);
+        endUndoBatch();
       };
       document.addEventListener('mousemove', onMove);
       document.addEventListener('mouseup', onUp);
     },
-    [selectedClip, currentTime, getSelectedBase, setTransformProp],
+    [selectedClip, currentTime, getSelectedBase, setTransformProp, beginUndoBatch, endUndoBatch],
   );
 
   // ---- Transform: rotation handle (group-aware) ----
@@ -536,6 +544,7 @@ export default function PreviewPanel() {
       const centerX = rect.left + rect.width / 2;
       const centerY = rect.top + rect.height / 2;
       const startAngle = Math.atan2(e.clientY - centerY, e.clientX - centerX) * (180 / Math.PI);
+      beginUndoBatch();
 
       const onMove = (ev: MouseEvent) => {
         const angle = Math.atan2(ev.clientY - centerY, ev.clientX - centerX) * (180 / Math.PI);
@@ -560,11 +569,12 @@ export default function PreviewPanel() {
       const onUp = () => {
         document.removeEventListener('mousemove', onMove);
         document.removeEventListener('mouseup', onUp);
+        endUndoBatch();
       };
       document.addEventListener('mousemove', onMove);
       document.addEventListener('mouseup', onUp);
     },
-    [selectedClipIds, snapshotSelectedVisible, setTransformProp, canvasSize],
+    [selectedClipIds, snapshotSelectedVisible, setTransformProp, canvasSize, beginUndoBatch, endUndoBatch],
   );
 
   // ---- Mask: set property (keyframe-aware, writes to clip.mask) ----
@@ -606,6 +616,7 @@ export default function PreviewPanel() {
       const anim = getAnimatedTransform(selectedClip, clipLocalTime);
       const boxW = base.w * anim.scale * anim.scaleX;
       const boxH = base.h * anim.scale * anim.scaleY;
+      beginUndoBatch();
 
       const onMove = (ev: MouseEvent) => {
         const dx = (ev.clientX - startX) / boxW;
@@ -616,11 +627,12 @@ export default function PreviewPanel() {
       const onUp = () => {
         document.removeEventListener('mousemove', onMove);
         document.removeEventListener('mouseup', onUp);
+        endUndoBatch();
       };
       document.addEventListener('mousemove', onMove);
       document.addEventListener('mouseup', onUp);
     },
-    [selectedClip, currentTime, getSelectedBase, setMaskProp],
+    [selectedClip, currentTime, getSelectedBase, setMaskProp, beginUndoBatch, endUndoBatch],
   );
 
   // ---- Mask: edge resize ----
@@ -646,6 +658,7 @@ export default function PreviewPanel() {
       const anim = getAnimatedTransform(selectedClip, clipLocalTime);
       const boxW = base.w * anim.scale * anim.scaleX;
       const boxH = base.h * anim.scale * anim.scaleY;
+      beginUndoBatch();
 
       const onMove = (ev: MouseEvent) => {
         const dx = (ev.clientX - startX) / boxW;
@@ -672,11 +685,12 @@ export default function PreviewPanel() {
       const onUp = () => {
         document.removeEventListener('mousemove', onMove);
         document.removeEventListener('mouseup', onUp);
+        endUndoBatch();
       };
       document.addEventListener('mousemove', onMove);
       document.addEventListener('mouseup', onUp);
     },
-    [selectedClip, currentTime, getSelectedBase, setMaskProp],
+    [selectedClip, currentTime, getSelectedBase, setMaskProp, beginUndoBatch, endUndoBatch],
   );
 
   // ---- Mask: corner resize (both width + height) ----
@@ -702,6 +716,7 @@ export default function PreviewPanel() {
       const anim = getAnimatedTransform(selectedClip, clipLocalTime);
       const boxW = base.w * anim.scale * anim.scaleX;
       const boxH = base.h * anim.scale * anim.scaleY;
+      beginUndoBatch();
 
       const onMove = (ev: MouseEvent) => {
         const dx = (ev.clientX - startX) / boxW;
@@ -719,11 +734,12 @@ export default function PreviewPanel() {
       const onUp = () => {
         document.removeEventListener('mousemove', onMove);
         document.removeEventListener('mouseup', onUp);
+        endUndoBatch();
       };
       document.addEventListener('mousemove', onMove);
       document.addEventListener('mouseup', onUp);
     },
-    [selectedClip, currentTime, getSelectedBase, setMaskProp],
+    [selectedClip, currentTime, getSelectedBase, setMaskProp, beginUndoBatch, endUndoBatch],
   );
 
   // ---- Canvas zoom (Ctrl/Cmd+wheel) & pan (scroll / middle-click / space+drag) ----

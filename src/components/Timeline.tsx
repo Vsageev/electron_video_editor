@@ -5,12 +5,12 @@ import TimelineClipComponent from './TimelineClip';
 import Tooltip from './Tooltip';
 
 export default function Timeline() {
-  const { timelineClips, selectedClipIds, currentTime, zoom, setZoom, selectClip, addClipAtTime, mediaFiles, tracks, addTrack, removeTrack, splitClipAtPlayhead, rippleEnabled, toggleRipple, autoSnapEnabled, toggleAutoSnap } =
+  const { timelineClips, selectedClipIds, currentTime, zoom, setZoom, selectClip, addClipAtTime, mediaFiles, tracks, addTrack, removeTrack, splitClipAtPlayhead, rippleEnabled, toggleRipple, autoSnapEnabled, toggleAutoSnap, draggingMediaIndex, trackInsertIndicator, dragInsertGhost, undoStack, redoStack } =
     useEditorStore();
   const containerRef = useRef<HTMLDivElement>(null);
   const isDraggingRef = useRef(false);
   const wasPlayingRef = useRef(false);
-  const [dragOverTrack, setDragOverTrack] = useState<number | null>(null);
+  const [dragGhost, setDragGhost] = useState<{ track: number; left: number; width: number } | null>(null);
 
   const clipsByTrack = useMemo(() => {
     const map = new Map<number, typeof timelineClips>();
@@ -129,30 +129,65 @@ export default function Timeline() {
     [selectClip]
   );
 
+  const computeGhostPosition = useCallback(
+    (clientX: number, trackEl: HTMLElement | null, track: number, mediaDuration: number) => {
+      const contentRect = trackEl
+        ? trackEl.getBoundingClientRect()
+        : null;
+      if (!contentRect) return null;
+      const x = clientX - contentRect.left;
+      let startTime = Math.max(0, x / zoom);
+      if (autoSnapEnabled) {
+        const snapThreshold = 10 / zoom;
+        const trackClipEdges = timelineClips
+          .filter((c) => c.track === track)
+          .flatMap((c) => [c.startTime, c.startTime + c.duration]);
+        const candidates = [0, currentTime, ...trackClipEdges];
+        let best = startTime;
+        let bestDiff = Infinity;
+        for (const candidate of candidates) {
+          const diff = Math.abs(candidate - startTime);
+          if (diff < bestDiff) {
+            bestDiff = diff;
+            best = candidate;
+          }
+        }
+        if (bestDiff <= snapThreshold) {
+          startTime = Math.max(0, best);
+        }
+      }
+      return { track, left: startTime * zoom, width: mediaDuration * zoom };
+    },
+    [zoom, autoSnapEnabled, timelineClips, currentTime]
+  );
+
   const handleDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault();
     e.dataTransfer.dropEffect = 'copy';
-  }, []);
-
-  const handleDragEnter = useCallback((e: React.DragEvent) => {
-    const target = (e.target as HTMLElement).closest('.track-content') as HTMLElement | null;
-    if (target) {
-      const trackId = target.dataset.track;
-      setDragOverTrack(trackId ? Number(trackId) : null);
+    if (draggingMediaIndex == null) return;
+    const media = mediaFiles[draggingMediaIndex];
+    if (!media) return;
+    const trackEl = (e.target as HTMLElement).closest('.track-content') as HTMLElement | null;
+    const trackAttr = trackEl?.dataset.track;
+    if (!trackEl || !trackAttr) {
+      setDragGhost(null);
+      return;
     }
-  }, []);
+    const track = Number(trackAttr);
+    setDragGhost(computeGhostPosition(e.clientX, trackEl, track, media.duration));
+  }, [draggingMediaIndex, mediaFiles, computeGhostPosition]);
 
   const handleDragLeave = useCallback((e: React.DragEvent) => {
     const related = e.relatedTarget as HTMLElement | null;
     if (!related || !related.closest?.('.track-content')) {
-      setDragOverTrack(null);
+      setDragGhost(null);
     }
   }, []);
 
   const handleDrop = useCallback(
     (e: React.DragEvent) => {
       e.preventDefault();
-      setDragOverTrack(null);
+      setDragGhost(null);
 
       const raw = e.dataTransfer.getData('application/json');
       if (!raw) return;
@@ -227,6 +262,31 @@ export default function Timeline() {
             >
               <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
                 <path d="M2 3h4v4H2zM8 7h4v4H8zM6 5l2 2" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </button>
+          </Tooltip>
+          <div style={{ width: 1, height: 16, background: 'var(--border-subtle)', margin: '0 4px' }} />
+          <Tooltip label={`Undo (${navigator.platform.includes('Mac') ? '\u2318' : 'Ctrl+'}Z)`} pos="bottom">
+            <button
+              className="btn-icon btn-sm"
+              disabled={undoStack.length === 0}
+              onClick={() => useEditorStore.getState().undo()}
+            >
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+                <path d="M4 7l-3 3 3 3" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+                <path d="M1 10h9a4 4 0 000-8H6" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </button>
+          </Tooltip>
+          <Tooltip label={`Redo (${navigator.platform.includes('Mac') ? '\u2318\u21e7' : 'Ctrl+Shift+'}Z)`} pos="bottom">
+            <button
+              className="btn-icon btn-sm"
+              disabled={redoStack.length === 0}
+              onClick={() => useEditorStore.getState().redo()}
+            >
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+                <path d="M12 7l3 3-3 3" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+                <path d="M15 10H6a4 4 0 010-8h4" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
               </svg>
             </button>
           </Tooltip>
@@ -310,38 +370,65 @@ export default function Timeline() {
         <div className="timeline-tracks-scroll" style={{ minWidth: containerWidth }}>
           {/* Dynamic Tracks */}
           {tracks.map((trackId, index) => (
-            <div className="track" key={trackId}>
-              <div className="track-header">
-                <span>Track {index + 1}</span>
-                {tracks.length > 1 && (
-                  <button
-                    className="track-remove-btn"
-                    onClick={() => removeTrack(trackId)}
-                    title="Remove track"
-                  >
-                    <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
-                      <path d="M2 2l6 6M8 2l-6 6" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
-                    </svg>
-                  </button>
-                )}
-              </div>
-              <div
-                className={`track-content${dragOverTrack === trackId ? ' drag-over' : ''}`}
-                data-track={trackId}
-                onDragEnter={handleDragEnter}
-                onDragLeave={handleDragLeave}
-              >
-                {(clipsByTrack.get(trackId) ?? []).map((clip) => (
-                  <TimelineClipComponent
-                    key={clip.id}
-                    clip={clip}
-                    zoom={zoom}
-                    isSelected={selectedClipIds.includes(clip.id)}
-                  />
-                ))}
+            <div className="track-slot" key={trackId}>
+              {trackInsertIndicator === index && (
+                <div className="track-insert-indicator">
+                  {dragInsertGhost && dragInsertGhost.insertIndex === index && (
+                    <div
+                      className="clip-drop-ghost insert-ghost"
+                      style={{ left: dragInsertGhost.left, width: dragInsertGhost.width }}
+                    />
+                  )}
+                </div>
+              )}
+              <div className="track">
+                <div className="track-header">
+                  <span>Track {index + 1}</span>
+                  {tracks.length > 1 && (
+                    <button
+                      className="track-remove-btn"
+                      onClick={() => removeTrack(trackId)}
+                      title="Remove track"
+                    >
+                      <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
+                        <path d="M2 2l6 6M8 2l-6 6" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+                      </svg>
+                    </button>
+                  )}
+                </div>
+                <div
+                  className={`track-content${dragGhost?.track === trackId ? ' drag-over' : ''}`}
+                  data-track={trackId}
+                  onDragLeave={handleDragLeave}
+                >
+                  {(clipsByTrack.get(trackId) ?? []).map((clip) => (
+                    <TimelineClipComponent
+                      key={clip.id}
+                      clip={clip}
+                      zoom={zoom}
+                      isSelected={selectedClipIds.includes(clip.id)}
+                    />
+                  ))}
+                  {dragGhost?.track === trackId && (
+                    <div
+                      className="clip-drop-ghost"
+                      style={{ left: dragGhost.left, width: dragGhost.width }}
+                    />
+                  )}
+                </div>
               </div>
             </div>
           ))}
+          {trackInsertIndicator === tracks.length && (
+            <div className="track-insert-indicator">
+              {dragInsertGhost && dragInsertGhost.insertIndex === tracks.length && (
+                <div
+                  className="clip-drop-ghost insert-ghost"
+                  style={{ left: dragInsertGhost.left, width: dragInsertGhost.width }}
+                />
+              )}
+            </div>
+          )}
 
           {/* Add Track Row */}
           <div className="track track-add" onClick={addTrack}>

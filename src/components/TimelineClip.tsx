@@ -1,5 +1,5 @@
 import { useCallback, useState, useMemo, memo } from 'react';
-import { useEditorStore } from '../store/editorStore';
+import { useEditorStore, hasOverlap } from '../store/editorStore';
 import ContextMenu from './ContextMenu';
 import type { TimelineClip as TimelineClipType, ContextMenuItem, AnimatableProp } from '../types';
 
@@ -29,7 +29,7 @@ function findSnapTarget(raw: number, candidates: number[], threshold: number): n
 }
 
 export default memo(function TimelineClip({ clip, zoom, isSelected }: TimelineClipProps) {
-  const { selectClip, removeClip, updateClip, generateSubtitles } = useEditorStore();
+  const { selectClip, removeClip, updateClip, generateSubtitles, beginUndoBatch, endUndoBatch, setTrackInsertIndicator, insertTrackAndMoveClip, setDragInsertGhost } = useEditorStore();
   const tracks = useEditorStore((s) => s.tracks);
   const mediaFiles = useEditorStore((s) => s.mediaFiles);
   const timelineClips = useEditorStore((s) => s.timelineClips);
@@ -68,6 +68,10 @@ export default memo(function TimelineClip({ clip, zoom, isSelected }: TimelineCl
       // Find all track-content elements for cross-track detection
       const trackHeight = parseInt(getComputedStyle(document.documentElement).getPropertyValue('--track-height')) || 56;
 
+      beginUndoBatch();
+
+      let pendingInsertIdx: number | null = null;
+
       const onMove = (ev: MouseEvent) => {
         const dx = ev.clientX - startX;
         const dy = ev.clientY - startY;
@@ -77,13 +81,72 @@ export default memo(function TimelineClip({ clip, zoom, isSelected }: TimelineCl
         // Determine track change based on vertical offset
         const currentTracks = useEditorStore.getState().tracks;
         const origIdx = currentTracks.indexOf(origTrack);
-        const trackOffset = Math.round(dy / trackHeight);
-        const newIdx = Math.max(0, Math.min(currentTracks.length - 1, origIdx + trackOffset));
-        const targetTrack = currentTracks[newIdx] ?? origTrack;
+
+        // Raw Y position within the tracks area
+        const rawY = origIdx * trackHeight + trackHeight / 2 + dy;
+        const trackIndexFloat = rawY / trackHeight;
+        const nearestIdx = Math.max(0, Math.min(currentTracks.length - 1, Math.round(trackIndexFloat - 0.5)));
+
+        // Determine zone within the nearest track: top 25% = insert-before, bottom 25% = insert-after, middle = on-track
+        const posInTrack = rawY - nearestIdx * trackHeight;
+        const fraction = posInTrack / trackHeight;
+
+        let insertIdx: number | null = null;
+        let targetTrack: number;
+        let onTrackIdx: number;
+
+        if (fraction < 0.25 && nearestIdx !== origIdx) {
+          // Edge zone: top of track → potential insert before nearestIdx
+          // But first check if clip fits on the nearest track
+          const neighborTrack = currentTracks[nearestIdx];
+          const neighborClips = useEditorStore.getState().timelineClips.filter(
+            (c) => c.track === neighborTrack && c.id !== clip.id,
+          );
+          if (!hasOverlap(neighborClips, nextStart, clipDuration)) {
+            // Fits on neighbor → move there instead of inserting
+            onTrackIdx = nearestIdx;
+            targetTrack = neighborTrack;
+          } else {
+            insertIdx = nearestIdx;
+            targetTrack = origTrack;
+            onTrackIdx = origIdx;
+          }
+        } else if (fraction > 0.75 && nearestIdx !== origIdx) {
+          // Edge zone: bottom of track → potential insert after nearestIdx
+          const candidateInsert = nearestIdx + 1;
+          // Suppress if this would just be adjacent to the clip's own track
+          if (candidateInsert === origIdx || candidateInsert === origIdx + 1) {
+            onTrackIdx = nearestIdx;
+            targetTrack = currentTracks[onTrackIdx] ?? origTrack;
+          } else {
+            // Check if clip fits on the nearest track
+            const neighborTrack = currentTracks[nearestIdx];
+            const neighborClips = useEditorStore.getState().timelineClips.filter(
+              (c) => c.track === neighborTrack && c.id !== clip.id,
+            );
+            if (!hasOverlap(neighborClips, nextStart, clipDuration)) {
+              onTrackIdx = nearestIdx;
+              targetTrack = neighborTrack;
+            } else {
+              insertIdx = candidateInsert;
+              targetTrack = origTrack;
+              onTrackIdx = origIdx;
+            }
+          }
+        } else {
+          // On-track behavior (middle 50%)
+          onTrackIdx = nearestIdx;
+          targetTrack = currentTracks[onTrackIdx] ?? origTrack;
+        }
+
+        pendingInsertIdx = insertIdx;
+        setTrackInsertIndicator(insertIdx);
+        // Ghost will be updated after snapping below
 
         if (autoSnapEnabled) {
+          const snapTrack = insertIdx != null ? origTrack : targetTrack;
           const edges = timelineClips
-            .filter((c) => c.id !== clip.id && c.track === targetTrack)
+            .filter((c) => c.id !== clip.id && c.track === snapTrack)
             .flatMap((c) => [c.startTime, c.startTime + c.duration]);
           const candidates = [0, currentTime, ...edges];
           const startSnap = findSnapTarget(nextStart, candidates, snapThreshold);
@@ -108,23 +171,36 @@ export default memo(function TimelineClip({ clip, zoom, isSelected }: TimelineCl
           }
         }
 
-        const updates: Partial<TimelineClipType> = { startTime: nextStart };
-        if (currentTracks[newIdx] !== undefined) {
-          updates.track = targetTrack;
+        // If in insert mode, keep clip on its original track but show ghost
+        if (insertIdx != null) {
+          updateClip(clip.id, { startTime: nextStart });
+          setDragInsertGhost({ insertIndex: insertIdx, left: nextStart * zoom, width: clipDuration * zoom });
+        } else {
+          setDragInsertGhost(null);
+          const updates: Partial<TimelineClipType> = { startTime: nextStart };
+          if (currentTracks[onTrackIdx] !== undefined) {
+            updates.track = targetTrack;
+          }
+          updateClip(clip.id, updates);
         }
-
-        updateClip(clip.id, updates);
       };
 
       const onUp = () => {
         document.removeEventListener('mousemove', onMove);
         document.removeEventListener('mouseup', onUp);
+        if (pendingInsertIdx != null) {
+          const currentClip = useEditorStore.getState().timelineClips.find((c) => c.id === clip.id);
+          insertTrackAndMoveClip(pendingInsertIdx, clip.id, currentClip?.startTime ?? clip.startTime);
+        }
+        setTrackInsertIndicator(null);
+        setDragInsertGhost(null);
+        endUndoBatch();
       };
 
       document.addEventListener('mousemove', onMove);
       document.addEventListener('mouseup', onUp);
     },
-    [clip.id, clip.startTime, clip.track, clip.duration, zoom, selectClip, updateClip, autoSnapEnabled, timelineClips, currentTime, isSelected]
+    [clip.id, clip.startTime, clip.track, clip.duration, zoom, selectClip, updateClip, autoSnapEnabled, timelineClips, currentTime, isSelected, beginUndoBatch, endUndoBatch, setTrackInsertIndicator, insertTrackAndMoveClip, setDragInsertGhost]
   );
 
   const handleTrim = useCallback(
@@ -150,6 +226,8 @@ export default memo(function TimelineClip({ clip, zoom, isSelected }: TimelineCl
 
       // Components and images have no fixed source duration — allow free resize
       const isFlexDuration = mediaType === 'component' || mediaType === 'image';
+
+      beginUndoBatch();
 
       const onMove = (ev: MouseEvent) => {
         const dx = ev.clientX - startX;
@@ -233,12 +311,13 @@ export default memo(function TimelineClip({ clip, zoom, isSelected }: TimelineCl
       const onUp = () => {
         document.removeEventListener('mousemove', onMove);
         document.removeEventListener('mouseup', onUp);
+        endUndoBatch();
       };
 
       document.addEventListener('mousemove', onMove);
       document.addEventListener('mouseup', onUp);
     },
-    [clip, zoom, selectClip, updateClip, autoSnapEnabled, timelineClips, currentTime]
+    [clip, zoom, selectClip, updateClip, autoSnapEnabled, timelineClips, currentTime, beginUndoBatch, endUndoBatch]
   );
 
   const handleContextMenu = useCallback(

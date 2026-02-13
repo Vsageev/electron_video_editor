@@ -1,6 +1,20 @@
 import { create } from 'zustand';
 import type { MediaFile, TimelineClip, AnimatableProp, EasingType, Keyframe, ProjectData, PropDefinition } from '../types';
 
+// ---------------------------------------------------------------------------
+// Undo / Redo – snapshot-based history
+// ---------------------------------------------------------------------------
+
+interface HistorySnapshot {
+  timelineClips: TimelineClip[];
+  tracks: number[];
+  trackIdCounter: number;
+  clipIdCounter: number;
+  mediaFiles: MediaFile[];
+}
+
+const MAX_HISTORY = 50;
+
 function toProjectRelativePath(filePath: string, projectDir: string | null): string | null {
   if (!filePath || !projectDir) return null;
   // Renderer may run on Windows (backslashes) while project data is stored with '/'.
@@ -99,7 +113,7 @@ function buildDefaultComponentProps(
   return Object.keys(props).length > 0 ? props : undefined;
 }
 
-function hasOverlap(
+export function hasOverlap(
   trackClips: TimelineClip[],
   startTime: number,
   duration: number,
@@ -215,20 +229,67 @@ interface EditorState {
   isGeneratingSubtitles: boolean;
   subtitleProgress: string;
   generateSubtitles: (clipId: number) => Promise<void>;
+
+  // Track insert indicator (ephemeral drag UI state)
+  trackInsertIndicator: number | null;
+  setTrackInsertIndicator: (index: number | null) => void;
+  insertTrackAndMoveClip: (insertIndex: number, clipId: number, startTime: number) => void;
+  dragInsertGhost: { insertIndex: number; left: number; width: number } | null;
+  setDragInsertGhost: (ghost: { insertIndex: number; left: number; width: number } | null) => void;
+
+  // Drag preview
+  draggingMediaIndex: number | null;
+  setDraggingMediaIndex: (idx: number | null) => void;
+
+  // Undo / Redo
+  undoStack: HistorySnapshot[];
+  redoStack: HistorySnapshot[];
+  undo: () => void;
+  redo: () => void;
+  beginUndoBatch: () => void;
+  endUndoBatch: () => void;
 }
 
-export const useEditorStore = create<EditorState>((set, get) => ({
+export const useEditorStore = create<EditorState>((set, get) => {
+  function takeSnapshot(s: EditorState): HistorySnapshot {
+    return {
+      timelineClips: s.timelineClips,
+      tracks: s.tracks,
+      trackIdCounter: s.trackIdCounter,
+      clipIdCounter: s.clipIdCounter,
+      mediaFiles: s.mediaFiles,
+    };
+  }
+
+  let batchDepth = 0;
+
+  function pushSnapshot() {
+    // During a batch (drag), only the first call saves a snapshot
+    if (batchDepth > 0) return;
+    const s = get();
+    const snap = takeSnapshot(s);
+    const undoStack = [...s.undoStack, snap];
+    // Cap at MAX_HISTORY
+    if (undoStack.length > MAX_HISTORY) undoStack.splice(0, undoStack.length - MAX_HISTORY);
+    // Clear redo stack on new action
+    set({ undoStack, redoStack: [] });
+  }
+
+  return ({
   // Media
   mediaFiles: [],
   selectedMediaIndex: null,
-  addMediaFiles: (files) =>
+  addMediaFiles: (files) => {
+    pushSnapshot();
     set((s) => ({
       mediaFiles: [
         ...s.mediaFiles,
         ...files.filter((f) => !s.mediaFiles.some((m) => m.path === f.path)),
       ],
-    })),
+    }));
+  },
   removeMediaFile: (index) => {
+    pushSnapshot();
     const s = get();
     const media = s.mediaFiles[index];
     if (!media) return;
@@ -309,22 +370,27 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   // Tracks
   tracks: [1, 2],
   trackIdCounter: 2,
-  addTrack: () =>
+  addTrack: () => {
+    pushSnapshot();
     set((s) => {
       const newId = s.trackIdCounter + 1;
       return { tracks: [...s.tracks, newId], trackIdCounter: newId };
-    }),
-  removeTrack: (trackId) =>
+    });
+  },
+  removeTrack: (trackId) => {
+    pushSnapshot();
     set((s) => ({
       tracks: s.tracks.filter((id) => id !== trackId),
       timelineClips: s.timelineClips.filter((c) => c.track !== trackId),
-    })),
+    }));
+  },
 
   // Timeline clips
   timelineClips: [],
   selectedClipIds: [],
   clipIdCounter: 0,
-  addClip: (media) =>
+  addClip: (media) => {
+    pushSnapshot();
     set((s) => {
       // Find first track where clip can be appended without overlap
       let targetTrack = s.tracks[0];
@@ -364,8 +430,10 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         clipIdCounter: newId,
         selectedClipIds: [newId],
       };
-    }),
-  addClipAtTime: (media, track, startTime) =>
+    });
+  },
+  addClipAtTime: (media, track, startTime) => {
+    pushSnapshot();
     set((s) => {
       const trackClips = s.timelineClips.filter((c) => c.track === track);
       if (hasOverlap(trackClips, startTime, media.duration)) {
@@ -396,8 +464,10 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         clipIdCounter: newId,
         selectedClipIds: [newId],
       };
-    }),
-  removeClip: (clipId) =>
+    });
+  },
+  removeClip: (clipId) => {
+    pushSnapshot();
     set((s) => {
       const removed = s.timelineClips.find((c) => c.id === clipId);
       let remaining = s.timelineClips.filter((c) => c.id !== clipId);
@@ -413,8 +483,10 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         timelineClips: remaining,
         selectedClipIds: s.selectedClipIds.filter((id) => id !== clipId),
       };
-    }),
-  removeSelectedClips: () =>
+    });
+  },
+  removeSelectedClips: () => {
+    pushSnapshot();
     set((s) => {
       if (s.selectedClipIds.length === 0) return s;
       const idsToRemove = new Set(s.selectedClipIds);
@@ -432,8 +504,10 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         }
       }
       return { timelineClips: remaining, selectedClipIds: [] };
-    }),
-  updateClip: (clipId, updates) =>
+    });
+  },
+  updateClip: (clipId, updates) => {
+    pushSnapshot();
     set((s) => {
       const clip = s.timelineClips.find((c) => c.id === clipId);
       if (!clip) return s;
@@ -452,7 +526,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       return {
         timelineClips: s.timelineClips.map((c) => (c.id === clipId ? nextClip : c)),
       };
-    }),
+    });
+  },
   selectClip: (clipId, opts) => set((s) => {
     if (clipId === null) return { selectedClipIds: [] };
     if (opts?.toggle) {
@@ -466,7 +541,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   }),
 
   // Keyframes
-  addKeyframe: (clipId, prop, time, value, easing) =>
+  addKeyframe: (clipId, prop, time, value, easing) => {
+    pushSnapshot();
     set((s) => ({
       timelineClips: s.timelineClips.map((c) => {
         if (c.id !== clipId) return c;
@@ -478,9 +554,11 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         kf[prop] = arr;
         return { ...c, keyframes: kf, keyframeIdCounter: newId };
       }),
-    })),
+    }));
+  },
 
-  addAllKeyframes: (clipId, time, values, easing) =>
+  addAllKeyframes: (clipId, time, values, easing) => {
+    pushSnapshot();
     set((s) => ({
       timelineClips: s.timelineClips.map((c) => {
         if (c.id !== clipId) return c;
@@ -497,9 +575,11 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         }
         return { ...c, keyframes: kf, keyframeIdCounter: counter };
       }),
-    })),
+    }));
+  },
 
-  updateKeyframe: (clipId, prop, kfId, updates) =>
+  updateKeyframe: (clipId, prop, kfId, updates) => {
+    pushSnapshot();
     set((s) => ({
       timelineClips: s.timelineClips.map((c) => {
         if (c.id !== clipId) return c;
@@ -511,9 +591,11 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         kf[prop] = arr;
         return { ...c, keyframes: kf };
       }),
-    })),
+    }));
+  },
 
-  removeKeyframe: (clipId, prop, kfId) =>
+  removeKeyframe: (clipId, prop, kfId) => {
+    pushSnapshot();
     set((s) => ({
       timelineClips: s.timelineClips.map((c) => {
         if (c.id !== clipId) return c;
@@ -527,7 +609,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         const hasAny = Object.keys(kf).length > 0;
         return { ...c, keyframes: hasAny ? kf : undefined };
       }),
-    })),
+    }));
+  },
 
   // Playback
   isPlaying: false,
@@ -561,7 +644,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     set((state) => ({ exportSettings: { ...state.exportSettings, ...s } })),
 
   // Clip splitting
-  splitClipAtPlayhead: () =>
+  splitClipAtPlayhead: () => {
+    pushSnapshot();
     set((s) => {
       const { selectedClipIds, currentTime } = s;
       if (selectedClipIds.length === 0) return s;
@@ -596,7 +680,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         clipIdCounter: newId,
         selectedClipIds: [newId],
       };
-    }),
+    });
+  },
 
   // Ripple edit
   rippleEnabled: false,
@@ -659,6 +744,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         selectedMediaIndex: null,
         currentTime: 0,
         isPlaying: false,
+        undoStack: [],
+        redoStack: [],
       });
       await window.api.setLastProject(name);
       // Save initial empty project
@@ -726,6 +813,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         selectedMediaIndex: null,
         currentTime: 0,
         isPlaying: false,
+        undoStack: [],
+        redoStack: [],
       });
       await window.api.setLastProject(name);
       // Start watching for external changes
@@ -955,6 +1044,32 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     }
   },
 
+  // Track insert indicator (ephemeral drag UI state)
+  trackInsertIndicator: null,
+  setTrackInsertIndicator: (index) => set({ trackInsertIndicator: index }),
+  insertTrackAndMoveClip: (insertIndex, clipId, startTime) => {
+    set((s) => {
+      const newTrackId = s.trackIdCounter + 1;
+      const nextTracks = [...s.tracks];
+      nextTracks.splice(insertIndex, 0, newTrackId);
+      return {
+        tracks: nextTracks,
+        trackIdCounter: newTrackId,
+        timelineClips: s.timelineClips.map((c) =>
+          c.id === clipId ? { ...c, track: newTrackId, startTime } : c,
+        ),
+        trackInsertIndicator: null,
+      };
+    });
+  },
+
+  dragInsertGhost: null,
+  setDragInsertGhost: (ghost) => set({ dragInsertGhost: ghost }),
+
+  // Drag preview
+  draggingMediaIndex: null,
+  setDraggingMediaIndex: (idx) => set({ draggingMediaIndex: idx }),
+
   closeProject: () => {
     window.api.unwatchProject();
     set({
@@ -971,9 +1086,47 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       selectedMediaIndex: null,
       currentTime: 0,
       isPlaying: false,
+      undoStack: [],
+      redoStack: [],
     });
   },
-}));
+
+  // Undo / Redo
+  undoStack: [],
+  redoStack: [],
+  undo: () => {
+    const s = get();
+    if (s.undoStack.length === 0) return;
+    const current = takeSnapshot(s);
+    const undoStack = s.undoStack.slice(0, -1);
+    const snap = s.undoStack[s.undoStack.length - 1];
+    set({
+      ...snap,
+      undoStack,
+      redoStack: [...s.redoStack, current],
+    });
+  },
+  redo: () => {
+    const s = get();
+    if (s.redoStack.length === 0) return;
+    const current = takeSnapshot(s);
+    const redoStack = s.redoStack.slice(0, -1);
+    const snap = s.redoStack[s.redoStack.length - 1];
+    set({
+      ...snap,
+      undoStack: [...s.undoStack, current],
+      redoStack,
+    });
+  },
+  beginUndoBatch: () => {
+    if (batchDepth === 0) pushSnapshot();
+    batchDepth++;
+  },
+  endUndoBatch: () => {
+    if (batchDepth > 0) batchDepth--;
+  },
+});
+});
 
 // ---------------------------------------------------------------------------
 // Auto-save: debounced subscription to persistent state changes

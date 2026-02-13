@@ -90,6 +90,19 @@ body {
   -webkit-app-region: no-drag;
 }
 
+.titlebar-history {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: 8px;
+  -webkit-app-region: no-drag;
+}
+
+.titlebar-history-btn:disabled {
+  opacity: 0.3;
+  pointer-events: none;
+}
+
 .btn-export {
   display: flex;
   align-items: center;
@@ -881,8 +894,63 @@ body {
   transition: border-color 0.15s ease;
 }
 
+.property-input[type="number"] {
+  cursor: ew-resize;
+}
+
+.property-input[type="number"]:focus {
+  cursor: text;
+}
+
 .property-input:focus {
   border-color: var(--border-focus);
+}
+
+/* Hide default number spinners */
+.property-input[type="number"]::-webkit-inner-spin-button,
+.property-input[type="number"]::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+.property-input[type="number"] {
+  -moz-appearance: textfield;
+}
+
+/* Custom checkbox */
+.property-row input[type="checkbox"] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: var(--bg-primary);
+  cursor: pointer;
+  position: relative;
+  transition: background 0.15s ease, border-color 0.15s ease;
+  flex-shrink: 0;
+}
+
+.property-row input[type="checkbox"]:hover {
+  border-color: rgba(255, 255, 255, 0.3);
+}
+
+.property-row input[type="checkbox"]:checked {
+  background: #93c5fd;
+  border-color: #93c5fd;
+}
+
+.property-row input[type="checkbox"]:checked::after {
+  content: '';
+  position: absolute;
+  left: 4.5px;
+  top: 1.5px;
+  width: 5px;
+  height: 9px;
+  border: solid #000;
+  border-width: 0 1.5px 1.5px 0;
+  transform: rotate(45deg);
 }
 
 /* ---- Editor Main ---- */
@@ -1431,6 +1499,39 @@ body {
   box-shadow: inset 0 0 0 1px rgba(147, 197, 253, 0.25);
 }
 
+.clip-drop-ghost {
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  border-radius: 6px;
+  background: rgba(147, 197, 253, 0.15);
+  border: 1.5px dashed rgba(147, 197, 253, 0.5);
+  pointer-events: none;
+  z-index: 5;
+}
+
+/* ---- Track Insert Indicator ---- */
+.track-insert-indicator {
+  position: relative;
+  height: var(--track-height);
+  margin: 0 0 0 var(--track-header-width);
+  pointer-events: none;
+  background: rgba(59, 130, 246, 0.08);
+  border-top: 2px solid var(--blue);
+  border-bottom: 2px solid var(--blue);
+}
+
+.track-insert-indicator .insert-ghost {
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+}
+
+@keyframes insert-indicator-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
 /* ---- Add Track Row ---- */
 .track.track-add {
   height: 32px;
@@ -1640,6 +1741,12 @@ body {
 .btn-icon:hover {
   color: var(--text-primary);
   background: var(--bg-card);
+}
+
+.btn-icon:disabled {
+  opacity: 0.3;
+  cursor: default;
+  pointer-events: none;
 }
 
 /* ---- Tooltips ---- */

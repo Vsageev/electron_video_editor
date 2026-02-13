@@ -175,6 +175,22 @@ export default function App() {
       const tag = el.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el.isContentEditable) return;
 
+      // Undo / Redo
+      if ((e.metaKey || e.ctrlKey) && e.code === 'KeyZ') {
+        e.preventDefault();
+        if (e.shiftKey) {
+          useEditorStore.getState().redo();
+        } else {
+          useEditorStore.getState().undo();
+        }
+        return;
+      }
+      if ((e.ctrlKey) && e.code === 'KeyY') {
+        e.preventDefault();
+        useEditorStore.getState().redo();
+        return;
+      }
+
       if (e.code === 'Delete' || e.code === 'Backspace') {
         const { selectedClipIds } = useEditorStore.getState();
         if (selectedClipIds.length > 0) {
