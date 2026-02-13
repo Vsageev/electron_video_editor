@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import type { MediaFile, TimelineClip, AnimatableProp, EasingType, Keyframe, ProjectData, PropDefinition } from '../types';
+import { clearComponentCache } from '../utils/componentLoader';
 
 // ---------------------------------------------------------------------------
 // Undo / Redo – snapshot-based history
@@ -113,6 +114,19 @@ function buildDefaultComponentProps(
   return Object.keys(props).length > 0 ? props : undefined;
 }
 
+/** Remove tracks that have no clips, keeping at least one track. */
+function pruneEmptyTracks(
+  tracks: number[],
+  clips: TimelineClip[],
+): number[] | null {
+  const occupied = new Set(clips.map((c) => c.track));
+  const pruned = tracks.filter((t) => occupied.has(t));
+  // Always keep at least one track
+  if (pruned.length === 0) return tracks.length > 1 ? [tracks[0]] : null;
+  if (pruned.length === tracks.length) return null; // nothing to prune
+  return pruned;
+}
+
 export function hasOverlap(
   trackClips: TimelineClip[],
   startTime: number,
@@ -193,6 +207,11 @@ interface EditorState {
   exportSettings: { width: number; height: number; fps: number; bitrate: number };
   setExportSettings: (s: Partial<{ width: number; height: number; fps: number; bitrate: number }>) => void;
 
+  // Render range (in/out points)
+  renderRangeStart: number | null;
+  renderRangeEnd: number | null;
+  setRenderRange: (start: number | null, end: number | null) => void;
+
   // Clip splitting
   splitClipAtPlayhead: () => void;
 
@@ -230,12 +249,22 @@ interface EditorState {
   subtitleProgress: string;
   generateSubtitles: (clipId: number) => Promise<void>;
 
+  // Snap indicator line (ephemeral UI state for visual snap feedback)
+  snapLineX: number | null;
+  setSnapLineX: (x: number | null) => void;
+
   // Track insert indicator (ephemeral drag UI state)
   trackInsertIndicator: number | null;
   setTrackInsertIndicator: (index: number | null) => void;
   insertTrackAndMoveClip: (insertIndex: number, clipId: number, startTime: number) => void;
+  insertTrackAndAddClip: (insertIndex: number, media: MediaFile, startTime: number) => void;
   dragInsertGhost: { insertIndex: number; left: number; width: number } | null;
   setDragInsertGhost: (ghost: { insertIndex: number; left: number; width: number } | null) => void;
+
+  // Clipboard (copy/paste)
+  clipboardClips: TimelineClip[];
+  copySelectedClips: () => void;
+  pasteClips: () => void;
 
   // Drag preview
   draggingMediaIndex: number | null;
@@ -335,6 +364,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
     delete nextMediaMetadata[mediaPath];
     if (media.bundlePath) delete nextMediaMetadata[media.bundlePath];
 
+    const prunedTracks = pruneEmptyTracks(s.tracks, remainingClips);
     set({
       mediaFiles: s.mediaFiles.filter((_, i) => i !== index),
       selectedMediaIndex: nextSelectedMediaIndex,
@@ -343,7 +373,13 @@ export const useEditorStore = create<EditorState>((set, get) => {
       previewMediaPath: nextPreviewMediaPath,
       previewMediaType: nextPreviewMediaType,
       mediaMetadata: nextMediaMetadata,
+      ...(prunedTracks ? { tracks: prunedTracks } : {}),
     });
+
+    // Clear component cache so re-adding picks up the fresh bundle
+    if (media.bundlePath) {
+      clearComponentCache(media.bundlePath);
+    }
 
     // Delete file from project media folder
     if (s.currentProject && s.projectDir) {
@@ -479,9 +515,11 @@ export const useEditorStore = create<EditorState>((set, get) => {
             : c,
         );
       }
+      const prunedTracks = pruneEmptyTracks(s.tracks, remaining);
       return {
         timelineClips: remaining,
         selectedClipIds: s.selectedClipIds.filter((id) => id !== clipId),
+        ...(prunedTracks ? { tracks: prunedTracks } : {}),
       };
     });
   },
@@ -503,7 +541,12 @@ export const useEditorStore = create<EditorState>((set, get) => {
           }
         }
       }
-      return { timelineClips: remaining, selectedClipIds: [] };
+      const prunedTracks = pruneEmptyTracks(s.tracks, remaining);
+      return {
+        timelineClips: remaining,
+        selectedClipIds: [],
+        ...(prunedTracks ? { tracks: prunedTracks } : {}),
+      };
     });
   },
   updateClip: (clipId, updates) => {
@@ -523,21 +566,27 @@ export const useEditorStore = create<EditorState>((set, get) => {
         }
       }
 
+      const nextClips = s.timelineClips.map((c) => (c.id === clipId ? nextClip : c));
+      const trackChanged = updates.track !== undefined && updates.track !== clip.track;
+      const prunedTracks = trackChanged ? pruneEmptyTracks(s.tracks, nextClips) : null;
       return {
-        timelineClips: s.timelineClips.map((c) => (c.id === clipId ? nextClip : c)),
+        timelineClips: nextClips,
+        ...(prunedTracks ? { tracks: prunedTracks } : {}),
       };
     });
   },
   selectClip: (clipId, opts) => set((s) => {
     if (clipId === null) return { selectedClipIds: [] };
+    // Clear standalone media preview when selecting a timeline clip
+    const clearPreview = s.previewMediaPath ? { previewMediaPath: null, previewMediaType: null } : {};
     if (opts?.toggle) {
       const idx = s.selectedClipIds.indexOf(clipId);
       if (idx >= 0) {
-        return { selectedClipIds: s.selectedClipIds.filter((id) => id !== clipId) };
+        return { selectedClipIds: s.selectedClipIds.filter((id) => id !== clipId), ...clearPreview };
       }
-      return { selectedClipIds: [...s.selectedClipIds, clipId] };
+      return { selectedClipIds: [...s.selectedClipIds, clipId], ...clearPreview };
     }
-    return { selectedClipIds: [clipId] };
+    return { selectedClipIds: [clipId], ...clearPreview };
   }),
 
   // Keyframes
@@ -616,7 +665,11 @@ export const useEditorStore = create<EditorState>((set, get) => {
   isPlaying: false,
   currentTime: 0,
   duration: 0,
-  setIsPlaying: (playing) => set({ isPlaying: playing }),
+  setIsPlaying: (playing) => set((s) => ({
+    isPlaying: playing,
+    // Clear standalone media preview when starting timeline playback
+    ...(playing && s.previewMediaPath ? { previewMediaPath: null, previewMediaType: null } : {}),
+  })),
   setCurrentTime: (time) => set({ currentTime: time }),
   setDuration: (duration) => set({ duration }),
 
@@ -643,42 +696,59 @@ export const useEditorStore = create<EditorState>((set, get) => {
   setExportSettings: (s) =>
     set((state) => ({ exportSettings: { ...state.exportSettings, ...s } })),
 
-  // Clip splitting
+  // Render range
+  renderRangeStart: null,
+  renderRangeEnd: null,
+  setRenderRange: (start, end) => set({ renderRangeStart: start, renderRangeEnd: end }),
+
+  // Clip splitting — splits all clips under playhead (CapCut-style)
+  // If clips are selected, split only those; otherwise split every clip the playhead crosses
   splitClipAtPlayhead: () => {
     pushSnapshot();
     set((s) => {
       const { selectedClipIds, currentTime } = s;
-      if (selectedClipIds.length === 0) return s;
-      const selectedClipId = selectedClipIds[selectedClipIds.length - 1];
-      const clip = s.timelineClips.find((c) => c.id === selectedClipId);
-      if (!clip) return s;
 
-      const clipEnd = clip.startTime + clip.duration;
-      // Playhead must be strictly inside the clip (not at edges)
-      if (currentTime <= clip.startTime || currentTime >= clipEnd) return s;
+      // Determine which clips to split
+      const clipsUnderPlayhead = s.timelineClips.filter(
+        (c) => currentTime > c.startTime && currentTime < c.startTime + c.duration,
+      );
+      const candidates =
+        selectedClipIds.length > 0
+          ? clipsUnderPlayhead.filter((c) => selectedClipIds.includes(c.id))
+          : clipsUnderPlayhead;
 
-      const leftDuration = currentTime - clip.startTime;
-      const rightDuration = clipEnd - currentTime;
+      if (candidates.length === 0) return s;
 
-      // Determine if this is a flex-duration clip (component/image)
-      const media = s.mediaFiles.find((m) => m?.path === clip.mediaPath);
-      const isFlexDuration = media?.type === 'component' || media?.type === 'image';
+      let nextClipId = s.clipIdCounter;
+      let updatedClips = [...s.timelineClips];
+      const newRightIds: number[] = [];
 
-      // Left clip: modify the existing clip in place
-      const leftClip: TimelineClip = isFlexDuration
-        ? { ...clip, duration: leftDuration, originalDuration: leftDuration, trimStart: 0, trimEnd: 0 }
-        : { ...clip, duration: leftDuration, trimEnd: clip.originalDuration - clip.trimStart - leftDuration };
+      for (const clip of candidates) {
+        const clipEnd = clip.startTime + clip.duration;
+        const leftDuration = currentTime - clip.startTime;
+        const rightDuration = clipEnd - currentTime;
 
-      // Right clip: new clip
-      const newId = s.clipIdCounter + 1;
-      const rightClip: TimelineClip = isFlexDuration
-        ? { ...clip, id: newId, startTime: currentTime, duration: rightDuration, originalDuration: rightDuration, trimStart: 0, trimEnd: 0 }
-        : { ...clip, id: newId, startTime: currentTime, duration: rightDuration, trimStart: clip.trimStart + leftDuration, trimEnd: clip.trimEnd };
+        const media = s.mediaFiles.find((m) => m?.path === clip.mediaPath);
+        const isFlexDuration = media?.type === 'component' || media?.type === 'image';
+
+        const leftClip: TimelineClip = isFlexDuration
+          ? { ...clip, duration: leftDuration, originalDuration: leftDuration, trimStart: 0, trimEnd: 0 }
+          : { ...clip, duration: leftDuration, trimEnd: clip.originalDuration - clip.trimStart - leftDuration };
+
+        nextClipId += 1;
+        const rightClip: TimelineClip = isFlexDuration
+          ? { ...clip, id: nextClipId, startTime: currentTime, duration: rightDuration, originalDuration: rightDuration, trimStart: 0, trimEnd: 0 }
+          : { ...clip, id: nextClipId, startTime: currentTime, duration: rightDuration, trimStart: clip.trimStart + leftDuration, trimEnd: clip.trimEnd };
+
+        updatedClips = updatedClips.map((c) => (c.id === clip.id ? leftClip : c));
+        updatedClips.push(rightClip);
+        newRightIds.push(nextClipId);
+      }
 
       return {
-        timelineClips: s.timelineClips.map((c) => (c.id === clip.id ? leftClip : c)).concat(rightClip),
-        clipIdCounter: newId,
-        selectedClipIds: [newId],
+        timelineClips: updatedClips,
+        clipIdCounter: nextClipId,
+        selectedClipIds: newRightIds,
       };
     });
   },
@@ -1012,7 +1082,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
           trimEnd: 0,
           originalDuration: segDuration,
           x: 0,
-          y: 0.4,
+          y: 0,
           scale: 1,
           scaleX: 1,
           scaleY: 1,
@@ -1021,6 +1091,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
             text: seg.text,
             color: '#ffffff',
             backgroundColor: 'rgba(0,0,0,0.6)',
+            verticalAlign: 'bottom',
           },
         });
       }
@@ -1044,6 +1115,10 @@ export const useEditorStore = create<EditorState>((set, get) => {
     }
   },
 
+  // Snap indicator line
+  snapLineX: null,
+  setSnapLineX: (x) => set({ snapLineX: x }),
+
   // Track insert indicator (ephemeral drag UI state)
   trackInsertIndicator: null,
   setTrackInsertIndicator: (index) => set({ trackInsertIndicator: index }),
@@ -1052,12 +1127,51 @@ export const useEditorStore = create<EditorState>((set, get) => {
       const newTrackId = s.trackIdCounter + 1;
       const nextTracks = [...s.tracks];
       nextTracks.splice(insertIndex, 0, newTrackId);
+      const nextClips = s.timelineClips.map((c) =>
+        c.id === clipId ? { ...c, track: newTrackId, startTime } : c,
+      );
+      // Prune the old track if it became empty after moving the clip
+      const prunedTracks = pruneEmptyTracks(nextTracks, nextClips);
+      return {
+        tracks: prunedTracks ?? nextTracks,
+        trackIdCounter: newTrackId,
+        timelineClips: nextClips,
+        trackInsertIndicator: null,
+      };
+    });
+  },
+  insertTrackAndAddClip: (insertIndex, media, startTime) => {
+    pushSnapshot();
+    set((s) => {
+      const newTrackId = s.trackIdCounter + 1;
+      const newClipId = s.clipIdCounter + 1;
+      const nextTracks = [...s.tracks];
+      nextTracks.splice(insertIndex, 0, newTrackId);
+      const componentProps = buildDefaultComponentProps(media.propDefinitions);
+      const clip: TimelineClip = {
+        id: newClipId,
+        mediaPath: media.path,
+        mediaName: media.name,
+        track: newTrackId,
+        startTime,
+        duration: media.duration,
+        trimStart: 0,
+        trimEnd: 0,
+        originalDuration: media.duration,
+        x: 0,
+        y: 0,
+        scale: 1,
+        scaleX: 1,
+        scaleY: 1,
+        rotation: 0,
+        ...(componentProps ? { componentProps } : {}),
+      };
       return {
         tracks: nextTracks,
         trackIdCounter: newTrackId,
-        timelineClips: s.timelineClips.map((c) =>
-          c.id === clipId ? { ...c, track: newTrackId, startTime } : c,
-        ),
+        clipIdCounter: newClipId,
+        timelineClips: [...s.timelineClips, clip],
+        selectedClipIds: [newClipId],
         trackInsertIndicator: null,
       };
     });
@@ -1065,6 +1179,74 @@ export const useEditorStore = create<EditorState>((set, get) => {
 
   dragInsertGhost: null,
   setDragInsertGhost: (ghost) => set({ dragInsertGhost: ghost }),
+
+  // Clipboard (copy/paste)
+  clipboardClips: [],
+  copySelectedClips: () => {
+    const s = get();
+    if (s.selectedClipIds.length === 0) return;
+    const clips = s.timelineClips.filter((c) => s.selectedClipIds.includes(c.id));
+    set({ clipboardClips: clips.map((c) => ({ ...c })) });
+  },
+  pasteClips: () => {
+    const s = get();
+    if (s.clipboardClips.length === 0) return;
+    pushSnapshot();
+
+    const playhead = s.currentTime;
+    // Offset: earliest clip start in clipboard becomes the playhead position
+    const minStart = Math.min(...s.clipboardClips.map((c) => c.startTime));
+    const baseOffset = playhead - minStart;
+
+    let nextClipId = s.clipIdCounter;
+    const newClips: TimelineClip[] = [];
+    const newIds: number[] = [];
+
+    for (const src of s.clipboardClips) {
+      nextClipId += 1;
+      const targetTrack = s.tracks.includes(src.track) ? src.track : s.tracks[0];
+      let startTime = src.startTime + baseOffset;
+
+      // If overlapping, find the first gap that fits after the desired position
+      const trackClips = [...s.timelineClips, ...newClips].filter((c) => c.track === targetTrack);
+      if (hasOverlap(trackClips, startTime, src.duration)) {
+        // Collect all clip ends on this track that are >= desired start, sorted
+        const sorted = trackClips
+          .filter((c) => c.startTime + c.duration > startTime)
+          .sort((a, b) => a.startTime - b.startTime);
+        let placed = false;
+        for (const c of sorted) {
+          const gapStart = c.startTime + c.duration;
+          if (!hasOverlap(trackClips, gapStart, src.duration)) {
+            startTime = gapStart;
+            placed = true;
+            break;
+          }
+        }
+        if (!placed) {
+          // Place after all clips on this track
+          const maxEnd = trackClips.reduce((m, c) => Math.max(m, c.startTime + c.duration), 0);
+          startTime = maxEnd;
+        }
+      }
+
+      newClips.push({
+        ...src,
+        id: nextClipId,
+        track: targetTrack,
+        startTime,
+      });
+      newIds.push(nextClipId);
+    }
+
+    if (newClips.length === 0) return;
+
+    set({
+      timelineClips: [...s.timelineClips, ...newClips],
+      clipIdCounter: nextClipId,
+      selectedClipIds: newIds,
+    });
+  },
 
   // Drag preview
   draggingMediaIndex: null,

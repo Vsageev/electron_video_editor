@@ -46,6 +46,20 @@ class ComponentErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundary
 }
 
 // ---------------------------------------------------------------------------
+// Looped local-time helper
+// ---------------------------------------------------------------------------
+
+/** Compute media-local time, wrapping around if clip.looped is true. */
+function computeLocalTime(clip: TimelineClip, globalTime: number): number {
+  const rawOffset = globalTime - clip.startTime; // time elapsed within clip on timeline
+  const playableLength = clip.originalDuration - clip.trimStart - clip.trimEnd;
+  if (clip.looped && playableLength > 0 && rawOffset > playableLength) {
+    return clip.trimStart + (rawOffset % playableLength);
+  }
+  return clip.trimStart + rawOffset;
+}
+
+// ---------------------------------------------------------------------------
 // VideoRenderer — existing VideoLayer logic
 // ---------------------------------------------------------------------------
 
@@ -63,7 +77,7 @@ const VideoRenderer = memo(function VideoRenderer({
   onSelect: (id: number, e?: { ctrlKey?: boolean; metaKey?: boolean }) => void;
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
-  const localTime = globalTime - clip.startTime + clip.trimStart;
+  const localTime = computeLocalTime(clip, globalTime);
   const src = useMemo(() => filePathToFileUrl(clip.mediaPath), [clip.mediaPath]);
 
   const handleMetadata = useCallback(() => {
@@ -77,19 +91,24 @@ const VideoRenderer = memo(function VideoRenderer({
   useEffect(() => {
     const v = videoRef.current;
     if (!v || v.readyState < 1) return;
-    if (isPlaying) v.play().catch(() => {});
-    else v.pause();
-  }, [isPlaying]);
+    if (clip.looped) {
+      // When looped, always seek-sync — don't let video free-run
+      v.pause();
+    } else {
+      if (isPlaying) v.play().catch(() => {});
+      else v.pause();
+    }
+  }, [isPlaying, clip.looped]);
 
   useEffect(() => {
-    if (isPlaying) return;
+    if (isPlaying && !clip.looped) return;
     const v = videoRef.current;
     if (!v || v.readyState < 1) return;
     const target = Math.max(0, localTime);
     if (Math.abs(v.currentTime - target) > 0.04) {
       v.currentTime = target;
     }
-  }, [localTime, isPlaying]);
+  }, [localTime, isPlaying, clip.looped]);
 
   const handleClick = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
@@ -284,7 +303,7 @@ const ComponentRenderer = memo(function ComponentRenderer({
     onSelect(clip.id, e);
   }, [clip.id, onSelect]);
 
-  const currentTime = globalTime - clip.startTime + clip.trimStart;
+  const currentTime = computeLocalTime(clip, globalTime);
   const progress = clip.duration > 0 ? currentTime / clip.duration : 0;
 
   // Compute fixed logical dimensions so the component always renders at the

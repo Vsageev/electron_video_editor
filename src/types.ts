@@ -102,6 +102,11 @@ export interface TimelineClip {
   // Keyframe animation
   keyframes?: KeyframeMap;
   keyframeIdCounter?: number;
+  // Looping (video/audio: repeat content when clip duration exceeds media length)
+  looped?: boolean;
+  // Flip (mirror)
+  flipX?: boolean;
+  flipY?: boolean;
   // Shape mask
   mask?: ClipMask;
   // Component custom props

@@ -29,14 +29,19 @@ function makeTransformStyle(
   sX = 1,
   sY = 1,
   rotation = 0,
+  flipX = false,
+  flipY = false,
 ): React.CSSProperties {
+  let transform = `translate(calc(-50% + ${x * bw}px), calc(-50% + ${y * bh}px))`;
+  if (rotation) transform += ` rotate(${rotation}deg)`;
+  if (flipX || flipY) transform += ` scale(${flipX ? -1 : 1}, ${flipY ? -1 : 1})`;
   return {
     position: 'absolute',
     width: bw * scale * sX,
     height: bh * scale * sY,
     left: '50%',
     top: '50%',
-    transform: `translate(calc(-50% + ${x * bw}px), calc(-50% + ${y * bh}px))${rotation ? ` rotate(${rotation}deg)` : ''}`,
+    transform,
   };
 }
 
@@ -133,6 +138,16 @@ function waitForDecodedFrame(video: HTMLVideoElement): Promise<void> {
       }
     }, 10);
   });
+}
+
+/** Compute media-local time, wrapping around if clip.looped is true. */
+function computeLocalTime(clip: TimelineClip, globalTime: number): number {
+  const rawOffset = globalTime - clip.startTime;
+  const playableLength = clip.originalDuration - clip.trimStart - clip.trimEnd;
+  if (clip.looped && playableLength > 0 && rawOffset > playableLength) {
+    return clip.trimStart + (rawOffset % playableLength);
+  }
+  return clip.trimStart + rawOffset;
 }
 
 function loadVideo(src: string): Promise<HTMLVideoElement> {
@@ -299,6 +314,8 @@ export async function exportToVideo(
   bitrate: number = 8_000_000,
   mediaFiles: MediaFile[] = [],
   tracks: number[] = [],
+  renderStart: number = 0,
+  renderEnd?: number,
 ): Promise<Blob> {
   const mediaByPath = new Map(mediaFiles.map((m) => [m.path, m]));
   const getMediaType = (clip: TimelineClip) => {
@@ -328,7 +345,10 @@ export async function exportToVideo(
     throw new Error('No video, image, or component clips to export');
   }
 
-  const totalDuration = Math.max(...clips.map((c) => c.startTime + c.duration));
+  const clipEnd = Math.max(...clips.map((c) => c.startTime + c.duration));
+  const effectiveStart = renderStart;
+  const effectiveEnd = renderEnd != null ? renderEnd : clipEnd;
+  const totalDuration = effectiveEnd - effectiveStart;
   const totalFrames = Math.ceil(totalDuration * fps);
   const frameDuration = 1 / fps;
 
@@ -463,7 +483,7 @@ export async function exportToVideo(
   for (let frameIdx = 0; frameIdx < totalFrames; frameIdx++) {
     if (abortSignal.aborted) break;
 
-    const timelineTime = frameIdx * frameDuration;
+    const timelineTime = effectiveStart + frameIdx * frameDuration;
 
     // Find visible clips at this frame
     const visibleClips = sortedRenderableClips.filter((clip) => {
@@ -477,7 +497,7 @@ export async function exportToVideo(
     for (const clip of visibleClips) {
       if (getMediaType(clip) !== 'video') continue;
       const video = videoElements.get(clip.id)!;
-      const clipLocalTime = clip.trimStart + (timelineTime - clip.startTime);
+      const clipLocalTime = computeLocalTime(clip, timelineTime);
       const dataUrl = await captureVideoFrame(video, clipLocalTime, width, height);
       videoFrameDataUrls.set(clip.id, dataUrl);
     }
@@ -488,7 +508,7 @@ export async function exportToVideo(
       if (getMediaType(clip) !== 'component') continue;
       const entry = componentEntriesByClipId.get(clip.id);
       if (!entry?.propDefinitions || !clip.componentProps) continue;
-      const currentTime = clip.trimStart + (timelineTime - clip.startTime);
+      const currentTime = computeLocalTime(clip, timelineTime);
       for (const [key, def] of Object.entries(entry.propDefinitions)) {
         if (def.type !== 'media') continue;
         const path = clip.componentProps[key];
@@ -528,7 +548,7 @@ export async function exportToVideo(
       // Build transform style — identical to PreviewPanel
       const style: React.CSSProperties = base.w > 0
         ? {
-            ...makeTransformStyle(x, y, scale, base.w, base.h, scaleX, scaleY, rotation),
+            ...makeTransformStyle(x, y, scale, base.w, base.h, scaleX, scaleY, rotation, !!clip.flipX, !!clip.flipY),
             ...(animMask ? { overflow: 'hidden' as const } : {}),
             ...(animMask ? { clipPath: buildClipPath(animMask) } : {}),
             ...(animMask && animMask.feather > 0 ? { filter: `blur(${animMask.feather}px)` } : {}),
@@ -555,7 +575,7 @@ export async function exportToVideo(
         const entry = componentEntriesByClipId.get(clip.id);
         if (!entry) continue;
 
-        const currentTime = clip.trimStart + animTime;
+        const currentTime = computeLocalTime(clip, timelineTime);
         const progress = clip.duration > 0 ? currentTime / clip.duration : 0;
         const containerW = base.w * scale * scaleX;
         const containerH = base.h * scale * scaleY;
@@ -707,7 +727,7 @@ export async function exportToVideo(
 
   if (hasAudio && (audioSourceClips.length > 0 || extraAudioSources.length > 0)) {
     try {
-      await renderAudio(audioSourceClips, totalDuration, muxer, extraAudioSources);
+      await renderAudio(audioSourceClips, totalDuration, muxer, extraAudioSources, effectiveStart);
     } catch (e) {
       console.warn('Audio encoding failed, exporting without audio:', e);
     }
@@ -735,6 +755,7 @@ async function renderAudio(
   totalDuration: number,
   muxer: Muxer<ArrayBufferTarget>,
   extraAudioSources: { mediaPath: string; startTime: number; trimStart: number; duration: number; mediaName: string }[] = [],
+  renderStart: number = 0,
 ) {
   const sampleRate = 48000;
   const numberOfChannels = 2;
@@ -765,13 +786,47 @@ async function renderAudio(
     }
   };
 
+  const renderEnd = renderStart + totalDuration;
+
   for (const clip of videoClips) {
-    await scheduleAudioSource(clip.mediaPath, clip.startTime, clip.trimStart, clip.duration, clip.mediaName);
+    // Skip clips entirely outside the render range
+    const clipEnd = clip.startTime + clip.duration;
+    if (clipEnd <= renderStart || clip.startTime >= renderEnd) continue;
+
+    if (clip.looped) {
+      const playableLength = clip.originalDuration - clip.trimStart - clip.trimEnd;
+      if (playableLength > 0) {
+        let offset = 0;
+        while (offset < clip.duration) {
+          const segStart = clip.startTime + offset;
+          const segDuration = Math.min(playableLength, clip.duration - offset);
+          const segEnd = segStart + segDuration;
+          // Clamp to render range
+          const clampedStart = Math.max(segStart, renderStart);
+          const clampedEnd = Math.min(segEnd, renderEnd);
+          if (clampedEnd > clampedStart) {
+            const trimOffset = clampedStart - segStart;
+            await scheduleAudioSource(clip.mediaPath, clampedStart - renderStart, clip.trimStart + trimOffset, clampedEnd - clampedStart, clip.mediaName);
+          }
+          offset += playableLength;
+        }
+      }
+    } else {
+      const clampedStart = Math.max(clip.startTime, renderStart);
+      const clampedEnd = Math.min(clipEnd, renderEnd);
+      const trimOffset = clampedStart - clip.startTime;
+      await scheduleAudioSource(clip.mediaPath, clampedStart - renderStart, clip.trimStart + trimOffset, clampedEnd - clampedStart, clip.mediaName);
+    }
   }
 
   // Include audio from videos embedded as component media props
   for (const src of extraAudioSources) {
-    await scheduleAudioSource(src.mediaPath, src.startTime, src.trimStart, src.duration, src.mediaName);
+    const srcEnd = src.startTime + src.duration;
+    if (srcEnd <= renderStart || src.startTime >= renderEnd) continue;
+    const clampedStart = Math.max(src.startTime, renderStart);
+    const clampedEnd = Math.min(srcEnd, renderEnd);
+    const trimOffset = clampedStart - src.startTime;
+    await scheduleAudioSource(src.mediaPath, clampedStart - renderStart, src.trimStart + trimOffset, clampedEnd - clampedStart, src.mediaName);
   }
 
   const renderedBuffer = await offlineCtx.startRendering();

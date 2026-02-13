@@ -1,11 +1,11 @@
-import { useRef, useState, useCallback, useMemo } from 'react';
+import { useRef, useState, useCallback, useMemo, useEffect } from 'react';
 import { useEditorStore } from '../store/editorStore';
 import { formatTimeShort } from '../utils/formatTime';
 import TimelineClipComponent from './TimelineClip';
 import Tooltip from './Tooltip';
 
 export default function Timeline() {
-  const { timelineClips, selectedClipIds, currentTime, zoom, setZoom, selectClip, addClipAtTime, mediaFiles, tracks, addTrack, removeTrack, splitClipAtPlayhead, rippleEnabled, toggleRipple, autoSnapEnabled, toggleAutoSnap, draggingMediaIndex, trackInsertIndicator, dragInsertGhost, undoStack, redoStack } =
+  const { timelineClips, selectedClipIds, currentTime, zoom, setZoom, selectClip, addClipAtTime, mediaFiles, tracks, addTrack, removeTrack, splitClipAtPlayhead, rippleEnabled, toggleRipple, autoSnapEnabled, toggleAutoSnap, draggingMediaIndex, trackInsertIndicator, dragInsertGhost, undoStack, redoStack, renderRangeStart, renderRangeEnd, setRenderRange, setTrackInsertIndicator, setDragInsertGhost, insertTrackAndAddClip, snapLineX, setSnapLineX } =
     useEditorStore();
   const containerRef = useRef<HTMLDivElement>(null);
   const isDraggingRef = useRef(false);
@@ -63,6 +63,8 @@ export default function Timeline() {
       const store = useEditorStore.getState();
       wasPlayingRef.current = store.isPlaying;
       if (store.isPlaying) store.setIsPlaying(false);
+      // Clear standalone media preview when interacting with timeline
+      if (store.previewMediaPath) store.setPreviewMedia(null);
 
       isDraggingRef.current = true;
       seekToX(e.clientX, rect);
@@ -124,6 +126,9 @@ export default function Timeline() {
     (e: React.MouseEvent) => {
       if (!(e.target as HTMLElement).closest('.timeline-clip')) {
         selectClip(null);
+        // Clear standalone media preview when clicking on timeline track area
+        const store = useEditorStore.getState();
+        if (store.previewMediaPath) store.setPreviewMedia(null);
       }
     },
     [selectClip]
@@ -137,6 +142,7 @@ export default function Timeline() {
       if (!contentRect) return null;
       const x = clientX - contentRect.left;
       let startTime = Math.max(0, x / zoom);
+      let snappedTo: number | null = null;
       if (autoSnapEnabled) {
         const snapThreshold = 10 / zoom;
         const trackClipEdges = timelineClips
@@ -154,11 +160,13 @@ export default function Timeline() {
         }
         if (bestDiff <= snapThreshold) {
           startTime = Math.max(0, best);
+          snappedTo = best;
         }
       }
+      setSnapLineX(snappedTo != null ? snappedTo * zoom : null);
       return { track, left: startTime * zoom, width: mediaDuration * zoom };
     },
-    [zoom, autoSnapEnabled, timelineClips, currentTime]
+    [zoom, autoSnapEnabled, timelineClips, currentTime, setSnapLineX]
   );
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
@@ -167,6 +175,63 @@ export default function Timeline() {
     if (draggingMediaIndex == null) return;
     const media = mediaFiles[draggingMediaIndex];
     if (!media) return;
+
+    const trackHeight = parseInt(getComputedStyle(document.documentElement).getPropertyValue('--track-height')) || 56;
+
+    // Use scroll container to compute track index via math, avoiding layout-shift flicker
+    const scrollContainer = containerRef.current?.querySelector('.timeline-tracks-scroll') as HTMLElement | null;
+    if (scrollContainer && tracks.length > 0) {
+      const scrollRect = scrollContainer.getBoundingClientRect();
+      // Account for the render-range-band (position: absolute, no layout impact) — first child is track-slot
+      const yInScroll = e.clientY - scrollRect.top + scrollContainer.scrollTop;
+
+      // Compute which track index and position within that track using pure math
+      // Each track-slot may include a track-insert-indicator above it; ignore that in math
+      const trackIndexFloat = yInScroll / trackHeight;
+      const nearestIdx = Math.max(0, Math.min(tracks.length - 1, Math.floor(trackIndexFloat)));
+      const fraction = trackIndexFloat - nearestIdx;
+
+      // Find the track-content element for the nearest track (for ghost position calc)
+      const trackContentEl = scrollContainer.querySelector(`.track-content[data-track="${tracks[nearestIdx]}"]`) as HTMLElement | null;
+
+      if (fraction < 0.25 && nearestIdx >= 0) {
+        // Top edge zone — insert before this track
+        setDragGhost(null);
+        setTrackInsertIndicator(nearestIdx);
+        if (trackContentEl) {
+          const ghost = computeGhostPosition(e.clientX, trackContentEl, tracks[nearestIdx], media.duration);
+          if (ghost) {
+            setDragInsertGhost({ insertIndex: nearestIdx, left: ghost.left, width: ghost.width });
+          }
+        }
+        return;
+      } else if (fraction > 0.75 && nearestIdx >= 0) {
+        // Bottom edge zone — insert after this track
+        setDragGhost(null);
+        setTrackInsertIndicator(nearestIdx + 1);
+        if (trackContentEl) {
+          const ghost = computeGhostPosition(e.clientX, trackContentEl, tracks[nearestIdx], media.duration);
+          if (ghost) {
+            setDragInsertGhost({ insertIndex: nearestIdx + 1, left: ghost.left, width: ghost.width });
+          }
+        }
+        return;
+      }
+
+      // Middle zone — drop onto existing track
+      setTrackInsertIndicator(null);
+      setDragInsertGhost(null);
+      if (trackContentEl) {
+        setDragGhost(computeGhostPosition(e.clientX, trackContentEl, tracks[nearestIdx], media.duration));
+      } else {
+        setDragGhost(null);
+      }
+      return;
+    }
+
+    // Fallback: no scroll container or no tracks
+    setTrackInsertIndicator(null);
+    setDragInsertGhost(null);
     const trackEl = (e.target as HTMLElement).closest('.track-content') as HTMLElement | null;
     const trackAttr = trackEl?.dataset.track;
     if (!trackEl || !trackAttr) {
@@ -175,19 +240,27 @@ export default function Timeline() {
     }
     const track = Number(trackAttr);
     setDragGhost(computeGhostPosition(e.clientX, trackEl, track, media.duration));
-  }, [draggingMediaIndex, mediaFiles, computeGhostPosition]);
+  }, [draggingMediaIndex, mediaFiles, computeGhostPosition, tracks, setTrackInsertIndicator, setDragInsertGhost]);
 
   const handleDragLeave = useCallback((e: React.DragEvent) => {
     const related = e.relatedTarget as HTMLElement | null;
     if (!related || !related.closest?.('.track-content')) {
       setDragGhost(null);
+      setTrackInsertIndicator(null);
+      setDragInsertGhost(null);
+      setSnapLineX(null);
     }
-  }, []);
+  }, [setTrackInsertIndicator, setDragInsertGhost, setSnapLineX]);
 
   const handleDrop = useCallback(
     (e: React.DragEvent) => {
       e.preventDefault();
       setDragGhost(null);
+      setSnapLineX(null);
+      const pendingInsert = useEditorStore.getState().trackInsertIndicator;
+      const pendingGhost = useEditorStore.getState().dragInsertGhost;
+      setTrackInsertIndicator(null);
+      setDragInsertGhost(null);
 
       const raw = e.dataTransfer.getData('application/json');
       if (!raw) return;
@@ -233,10 +306,128 @@ export default function Timeline() {
         }
       }
 
-      addClipAtTime(media, track, startTime);
+      // If in insert mode, create a new track and place the clip there
+      if (pendingInsert != null) {
+        insertTrackAndAddClip(pendingInsert, media, startTime);
+      } else {
+        addClipAtTime(media, track, startTime);
+      }
     },
-    [mediaFiles, zoom, addClipAtTime, tracks, autoSnapEnabled, timelineClips, currentTime]
+    [mediaFiles, zoom, addClipAtTime, tracks, autoSnapEnabled, timelineClips, currentTime, setTrackInsertIndicator, setDragInsertGhost, insertTrackAndAddClip, setSnapLineX]
   );
+
+  // Keyboard shortcuts: I = set in point, O = set out point
+  useEffect(() => {
+    const handleKey = (e: KeyboardEvent) => {
+      const el = e.target as HTMLElement;
+      const tag = el.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el.isContentEditable) return;
+
+      if (e.code === 'KeyI' && !e.metaKey && !e.ctrlKey) {
+        e.preventDefault();
+        const s = useEditorStore.getState();
+        // If setting in after out, clamp
+        const end = s.renderRangeEnd;
+        if (end != null && s.currentTime >= end) return;
+        s.setRenderRange(s.currentTime, s.renderRangeEnd);
+      } else if (e.code === 'KeyO' && !e.metaKey && !e.ctrlKey) {
+        e.preventDefault();
+        const s = useEditorStore.getState();
+        const start = s.renderRangeStart;
+        if (start != null && s.currentTime <= start) return;
+        s.setRenderRange(s.renderRangeStart, s.currentTime);
+      }
+    };
+    document.addEventListener('keydown', handleKey);
+    return () => document.removeEventListener('keydown', handleKey);
+  }, []);
+
+  const handleRangeMarkerDown = useCallback(
+    (which: 'start' | 'end', e: React.MouseEvent) => {
+      e.stopPropagation();
+      const ruler = containerRef.current?.querySelector('.time-ruler') as HTMLElement | null;
+      if (!ruler) return;
+      const rect = ruler.getBoundingClientRect();
+
+      const onMove = (ev: MouseEvent) => {
+        const x = ev.clientX - rect.left;
+        const time = Math.max(0, x / zoom);
+        const s = useEditorStore.getState();
+        if (which === 'start') {
+          const end = s.renderRangeEnd;
+          if (end != null && time >= end) return;
+          s.setRenderRange(time, s.renderRangeEnd);
+        } else {
+          const start = s.renderRangeStart;
+          if (start != null && time <= start) return;
+          s.setRenderRange(s.renderRangeStart, time);
+        }
+      };
+      const onUp = () => {
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+      };
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    },
+    [zoom]
+  );
+
+  // Right-click context menu on ruler for range
+  const [rulerCtx, setRulerCtx] = useState<{ x: number; y: number; time: number } | null>(null);
+
+  const handleRulerContextMenu = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault();
+      const ruler = containerRef.current?.querySelector('.time-ruler') as HTMLElement | null;
+      if (!ruler) return;
+      const rect = ruler.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const time = Math.max(0, x / zoom);
+      setRulerCtx({ x: e.clientX, y: e.clientY, time });
+    },
+    [zoom]
+  );
+
+  useEffect(() => {
+    if (!rulerCtx) return;
+    const dismiss = () => setRulerCtx(null);
+    document.addEventListener('click', dismiss);
+    document.addEventListener('contextmenu', dismiss);
+    return () => {
+      document.removeEventListener('click', dismiss);
+      document.removeEventListener('contextmenu', dismiss);
+    };
+  }, [rulerCtx]);
+
+  // Right-click context menu on track area (paste)
+  const [trackCtx, setTrackCtx] = useState<{ x: number; y: number } | null>(null);
+
+  const handleTrackContextMenu = useCallback(
+    (e: React.MouseEvent) => {
+      const target = e.target as HTMLElement;
+      // Only show on empty track area, not on clips, ruler, or toolbar
+      if (target.closest('.timeline-clip') || target.closest('.time-ruler') || target.closest('.timeline-toolbar')) return;
+      // Must be inside a track-content area
+      if (!target.closest('.track-content')) return;
+      e.preventDefault();
+      const s = useEditorStore.getState();
+      if (s.clipboardClips.length === 0) return;
+      setTrackCtx({ x: e.clientX, y: e.clientY });
+    },
+    []
+  );
+
+  useEffect(() => {
+    if (!trackCtx) return;
+    const dismiss = () => setTrackCtx(null);
+    document.addEventListener('click', dismiss);
+    document.addEventListener('contextmenu', dismiss);
+    return () => {
+      document.removeEventListener('click', dismiss);
+      document.removeEventListener('contextmenu', dismiss);
+    };
+  }, [trackCtx]);
 
   const playheadLeft = currentTime * zoom;
 
@@ -342,12 +533,14 @@ export default function Timeline() {
         onMouseDown={handleTrackClick}
         onDragOver={handleDragOver}
         onDrop={handleDrop}
+        onContextMenu={handleTrackContextMenu}
       >
         {/* Time Ruler */}
         <div
           className="time-ruler"
           style={{ width: containerWidth }}
           onMouseDown={handleScrubStart}
+          onContextMenu={handleRulerContextMenu}
         >
           {rulerMarks.map((mark) => (
             <div
@@ -359,7 +552,82 @@ export default function Timeline() {
               <div className={`ruler-mark-line${mark.isMajor ? ' major' : ''}`} />
             </div>
           ))}
+
+          {/* Render range overlay */}
+          {renderRangeStart != null && renderRangeEnd != null && (
+            <div
+              className="render-range-overlay"
+              style={{
+                left: renderRangeStart * zoom,
+                width: (renderRangeEnd - renderRangeStart) * zoom,
+              }}
+            />
+          )}
+
+          {/* In marker */}
+          {renderRangeStart != null && (
+            <div
+              className="render-range-marker render-range-in"
+              style={{ left: renderRangeStart * zoom }}
+              onMouseDown={(e) => handleRangeMarkerDown('start', e)}
+              title={`In: ${formatTimeShort(renderRangeStart)}`}
+            >
+              <svg width="8" height="12" viewBox="0 0 8 12">
+                <path d="M8 0L8 12L0 6Z" fill="currentColor" />
+              </svg>
+            </div>
+          )}
+
+          {/* Out marker */}
+          {renderRangeEnd != null && (
+            <div
+              className="render-range-marker render-range-out"
+              style={{ left: renderRangeEnd * zoom }}
+              onMouseDown={(e) => handleRangeMarkerDown('end', e)}
+              title={`Out: ${formatTimeShort(renderRangeEnd)}`}
+            >
+              <svg width="8" height="12" viewBox="0 0 8 12">
+                <path d="M0 0L0 12L8 6Z" fill="currentColor" />
+              </svg>
+            </div>
+          )}
         </div>
+
+        {/* Ruler right-click context menu */}
+        {rulerCtx && (
+          <div
+            className="context-menu"
+            style={{ position: 'fixed', left: rulerCtx.x, top: rulerCtx.y, zIndex: 100 }}
+          >
+            <div className="context-menu-item" onClick={() => { setRenderRange(rulerCtx.time, renderRangeEnd); setRulerCtx(null); }}>
+              Set In Point Here
+            </div>
+            <div className="context-menu-item" onClick={() => { setRenderRange(renderRangeStart, rulerCtx.time); setRulerCtx(null); }}>
+              Set Out Point Here
+            </div>
+            <div className="context-menu-divider" />
+            <div className="context-menu-item" onClick={() => { setRenderRange(null, null); setRulerCtx(null); }}>
+              Clear Range
+            </div>
+          </div>
+        )}
+
+        {/* Track area context menu (paste) */}
+        {trackCtx && (
+          <div
+            className="context-menu"
+            style={{ position: 'fixed', left: trackCtx.x, top: trackCtx.y, zIndex: 100 }}
+          >
+            <div className="context-menu-item" onClick={() => { useEditorStore.getState().pasteClips(); setTrackCtx(null); }}>
+              Paste
+            </div>
+          </div>
+        )}
+
+        {/* Snap indicator line */}
+        {snapLineX != null && (
+          <div className="snap-indicator-line" style={{ transform: `translateX(${snapLineX}px)` }} />
+        )}
 
         {/* Playhead */}
         <div className="playhead" style={{ transform: `translateX(${playheadLeft}px)` }}>
@@ -368,6 +636,17 @@ export default function Timeline() {
         </div>
 
         <div className="timeline-tracks-scroll" style={{ minWidth: containerWidth }}>
+          {/* Render range band across tracks */}
+          {renderRangeStart != null && renderRangeEnd != null && (
+            <div
+              className="render-range-band"
+              style={{
+                left: `calc(var(--track-header-width) + ${renderRangeStart * zoom}px)`,
+                width: (renderRangeEnd - renderRangeStart) * zoom,
+              }}
+            />
+          )}
+
           {/* Dynamic Tracks */}
           {tracks.map((trackId, index) => (
             <div className="track-slot" key={trackId}>

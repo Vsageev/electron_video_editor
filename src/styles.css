@@ -277,6 +277,50 @@ body {
   color: var(--text-tertiary);
 }
 
+/* ---- Media Filter Chips ---- */
+.media-filter-chips {
+  display: flex;
+  gap: 6px;
+  padding: 8px 12px;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--border-subtle);
+  scrollbar-width: none;
+  flex-shrink: 0;
+}
+.media-filter-chips::-webkit-scrollbar {
+  display: none;
+}
+.media-filter-chip {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 10px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  background: transparent;
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+}
+.media-filter-chip:hover {
+  color: var(--text-primary);
+  border-color: var(--text-tertiary);
+}
+.media-filter-chip.active {
+  color: var(--text-primary);
+  background: rgba(255, 255, 255, 0.08);
+  border-color: var(--text-secondary);
+}
+.media-filter-chip-count {
+  font-size: 10px;
+  color: var(--text-tertiary);
+  font-weight: 400;
+}
+
 /* ---- Media List ---- */
 .media-list {
   flex: 1;
@@ -1414,6 +1458,69 @@ body {
   height: 10px;
 }
 
+/* ---- Render Range Markers ---- */
+.render-range-overlay {
+  position: absolute;
+  top: 0;
+  height: 100%;
+  background: rgba(167, 139, 250, 0.15);
+  pointer-events: none;
+  z-index: 1;
+}
+
+.render-range-marker {
+  position: absolute;
+  top: 2px;
+  z-index: 5;
+  cursor: ew-resize;
+  color: var(--purple);
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+}
+
+.render-range-in {
+  transform: translateX(-8px);
+}
+
+.render-range-out {
+  transform: translateX(0px);
+}
+
+.render-range-marker:hover {
+  color: #c4b5fd;
+}
+
+.render-range-band {
+  position: absolute;
+  top: 0;
+  height: 100%;
+  background: rgba(167, 139, 250, 0.06);
+  border-left: 1px solid rgba(167, 139, 250, 0.3);
+  border-right: 1px solid rgba(167, 139, 250, 0.3);
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* ---- Export range info ---- */
+.export-range-info {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+
+.export-range-label {
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.export-range-hint {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  font-style: italic;
+}
+
 /* ---- Playhead ---- */
 .playhead {
   position: absolute;
@@ -1513,18 +1620,29 @@ body {
 /* ---- Track Insert Indicator ---- */
 .track-insert-indicator {
   position: relative;
-  height: var(--track-height);
+  height: 0;
   margin: 0 0 0 var(--track-header-width);
   pointer-events: none;
+  z-index: 10;
+}
+
+.track-insert-indicator::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: calc(var(--track-height) / -2);
+  height: var(--track-height);
   background: rgba(59, 130, 246, 0.08);
   border-top: 2px solid var(--blue);
   border-bottom: 2px solid var(--blue);
+  pointer-events: none;
 }
 
 .track-insert-indicator .insert-ghost {
   position: absolute;
-  top: 4px;
-  bottom: 4px;
+  top: calc(var(--track-height) / -2 + 4px);
+  height: calc(var(--track-height) - 8px);
 }
 
 @keyframes insert-indicator-pulse {
@@ -1636,28 +1754,75 @@ body {
   color: var(--text-primary);
 }
 
-/* Trim handles */
+/* Trim handles — CapCut-style wide hit area with bracket indicators */
 .clip-handle {
   position: absolute;
   top: 0;
-  width: 6px;
+  width: 8px;
   height: 100%;
   cursor: ew-resize;
   z-index: 2;
+  transition: background 0.12s ease, width 0.12s ease;
+}
+
+.clip-handle::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 2px;
+  height: 16px;
+  border-radius: 1px;
+  background: transparent;
+  transition: background 0.12s ease;
 }
 
 .clip-handle-left {
-  left: 0;
+  left: -2px;
   border-radius: 6px 0 0 6px;
 }
 
+.clip-handle-left::after {
+  right: 2px;
+}
+
 .clip-handle-right {
-  right: 0;
+  right: -2px;
   border-radius: 0 6px 6px 0;
 }
 
+.clip-handle-right::after {
+  left: 2px;
+}
+
 .timeline-clip:hover .clip-handle {
-  background: rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.15);
+  width: 10px;
+}
+
+.timeline-clip:hover .clip-handle::after {
+  background: rgba(255, 255, 255, 0.5);
+}
+
+.clip-handle:active {
+  background: rgba(255, 255, 255, 0.25);
+}
+
+.clip-handle:active::after {
+  background: rgba(255, 255, 255, 0.8);
+}
+
+/* Snap indicator line */
+.snap-indicator-line {
+  position: absolute;
+  top: 0;
+  height: 100%;
+  left: var(--track-header-width);
+  width: 1.5px;
+  background: var(--yellow);
+  z-index: 20;
+  pointer-events: none;
+  box-shadow: 0 0 6px var(--yellow), 0 0 2px var(--yellow);
 }
 
 /* Keyframe markers on timeline clips */
@@ -1942,11 +2107,23 @@ body {
   overflow: hidden;
 }
 
+.keyframe-group-header-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.keyframe-group-header-row > .keyframe-delete-btn {
+  flex-shrink: 0;
+  margin-right: 4px;
+}
+
 .keyframe-group-header {
   display: flex;
   align-items: center;
   gap: 6px;
-  width: 100%;
+  flex: 1;
+  min-width: 0;
   padding: 5px 8px;
   background: var(--bg-primary);
   border: none;
@@ -2088,6 +2265,31 @@ body {
 .mask-shape-btn.active {
   color: var(--text-primary);
   background: var(--purple-bg);
+}
+
+/* ---- Flip Toggle Buttons ---- */
+.flip-toggle-btn {
+  padding: 3px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  font-family: inherit;
+  color: var(--text-secondary);
+  background: transparent;
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.flip-toggle-btn:hover {
+  color: var(--text-primary);
+  background: var(--bg-card-hover);
+}
+
+.flip-toggle-btn.active {
+  color: var(--text-primary);
+  background: var(--purple-bg);
+  border-color: var(--purple);
 }
 
 /* ---- Mask Interactive Overlay ---- */
@@ -2533,6 +2735,7 @@ body {
   border-bottom: 1px solid rgba(234, 179, 8, 0.2);
 }
 
+.project-banner-copy,
 .project-banner-dismiss {
   width: 24px;
   height: 24px;
@@ -2549,6 +2752,7 @@ body {
   transition: all 0.15s ease;
 }
 
+.project-banner-copy:hover,
 .project-banner-dismiss:hover {
   opacity: 1;
   background: rgba(255, 255, 255, 0.06);

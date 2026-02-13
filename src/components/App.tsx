@@ -1,6 +1,7 @@
 import { useEffect, useCallback, useRef, useState, useMemo } from 'react';
 import { useEditorStore } from '../store/editorStore';
 import { exportToVideo } from '../utils/canvasExport';
+import { formatTimeShort } from '../utils/formatTime';
 import MediaSidebar from './MediaSidebar';
 import PreviewPanel from './PreviewPanel';
 import Timeline from './Timeline';
@@ -8,6 +9,8 @@ import PropertiesSidebar from './PropertiesSidebar';
 import ApiKeysModal from './ApiKeysModal';
 import ProjectPicker from './ProjectPicker';
 import Tooltip from './Tooltip';
+
+type RenderRangeMode = 'full' | 'timeRange' | 'selectedClips';
 
 /* ---- Error Banner (expandable) ---- */
 function ErrorBanner({ error, onDismiss }: { error: string; onDismiss: () => void }) {
@@ -139,9 +142,13 @@ export default function App() {
     () => buildResolutionPresets(exportSettings.width, exportSettings.height),
     [exportSettings.width, exportSettings.height],
   );
+  const selectedClipIds = useEditorStore((s) => s.selectedClipIds);
+  const renderRangeStart = useEditorStore((s) => s.renderRangeStart);
+  const renderRangeEnd = useEditorStore((s) => s.renderRangeEnd);
   const abortRef = useRef<AbortController | null>(null);
   const [showProjectPicker, setShowProjectPicker] = useState(false);
   const [projectLoading, setProjectLoading] = useState(true);
+  const [renderRangeMode, setRenderRangeMode] = useState<RenderRangeMode>('full');
 
   // Auto-load last project on startup
   useEffect(() => {
@@ -191,10 +198,36 @@ export default function App() {
         return;
       }
 
+      // Copy / Paste clips
+      if ((e.metaKey || e.ctrlKey) && e.code === 'KeyC') {
+        const s = useEditorStore.getState();
+        if (s.selectedClipIds.length > 0) {
+          e.preventDefault();
+          s.copySelectedClips();
+        }
+        return;
+      }
+      if ((e.metaKey || e.ctrlKey) && e.code === 'KeyV') {
+        const s = useEditorStore.getState();
+        if (s.clipboardClips.length > 0) {
+          e.preventDefault();
+          s.pasteClips();
+        }
+        return;
+      }
+
       if (e.code === 'Delete' || e.code === 'Backspace') {
-        const { selectedClipIds } = useEditorStore.getState();
-        if (selectedClipIds.length > 0) {
-          removeSelectedClips();
+        const store = useEditorStore.getState();
+        if (store.selectedClipIds.length > 0) {
+          // Shift+Delete/Backspace: force ripple delete (close gaps)
+          if (e.shiftKey && !store.rippleEnabled) {
+            // Temporarily enable ripple, delete, then restore
+            store.toggleRipple();
+            removeSelectedClips();
+            store.toggleRipple();
+          } else {
+            removeSelectedClips();
+          }
         }
         return;
       }
@@ -230,7 +263,24 @@ export default function App() {
   const handleExport = useCallback(async () => {
     if (timelineClips.length === 0) return;
 
-    const { width, height, fps, bitrate } = useEditorStore.getState().exportSettings;
+    const state = useEditorStore.getState();
+    const { width, height, fps, bitrate } = state.exportSettings;
+
+    // Determine clips and range based on render mode
+    let exportClips = timelineClips;
+    let renderStart = 0;
+    let renderEnd: number | undefined;
+
+    if (renderRangeMode === 'timeRange') {
+      if (state.renderRangeStart != null) renderStart = state.renderRangeStart;
+      if (state.renderRangeEnd != null) renderEnd = state.renderRangeEnd;
+    } else if (renderRangeMode === 'selectedClips') {
+      const selected = timelineClips.filter((c) => state.selectedClipIds.includes(c.id));
+      if (selected.length === 0) return;
+      renderStart = Math.min(...selected.map((c) => c.startTime));
+      renderEnd = Math.max(...selected.map((c) => c.startTime + c.duration));
+      exportClips = selected;
+    }
 
     const outputPath = await window.api.exportDialog();
     if (!outputPath) return;
@@ -244,15 +294,17 @@ export default function App() {
 
     try {
       const blob = await exportToVideo(
-        timelineClips,
+        exportClips,
         width,
         height,
         fps,
         (percent) => setExportProgress(percent),
         abort.signal,
         bitrate,
-        useEditorStore.getState().mediaFiles,
-        useEditorStore.getState().tracks,
+        state.mediaFiles,
+        state.tracks,
+        renderStart,
+        renderEnd,
       );
 
       if (!abort.signal.aborted) {
@@ -270,7 +322,7 @@ export default function App() {
       abortRef.current = null;
       setIsExporting(false);
     }
-  }, [timelineClips, setIsExporting, setExportProgress, setShowExportSettings]);
+  }, [timelineClips, renderRangeMode, setIsExporting, setExportProgress, setShowExportSettings]);
 
   const handleCancelExport = useCallback(() => {
     abortRef.current?.abort();
@@ -382,6 +434,42 @@ export default function App() {
             <div className="export-modal-title">Export Settings</div>
 
             <div className="export-settings-row">
+              <label className="export-settings-label">Range</label>
+              <select
+                className="export-settings-select"
+                value={renderRangeMode}
+                onChange={(e) => setRenderRangeMode(e.target.value as RenderRangeMode)}
+              >
+                <option value="full">Full Timeline</option>
+                <option value="timeRange">Time Range</option>
+                <option value="selectedClips">Selected Clips</option>
+              </select>
+            </div>
+
+            {renderRangeMode === 'timeRange' && (
+              <div className="export-settings-row export-range-info">
+                <label className="export-settings-label">In / Out</label>
+                <span className="export-range-label">
+                  {renderRangeStart != null ? formatTimeShort(renderRangeStart) : '0:00'} — {renderRangeEnd != null ? formatTimeShort(renderRangeEnd) : 'end'}
+                </span>
+                {renderRangeStart == null && renderRangeEnd == null && (
+                  <span className="export-range-hint">Set in/out points on the timeline (I/O keys)</span>
+                )}
+              </div>
+            )}
+
+            {renderRangeMode === 'selectedClips' && (
+              <div className="export-settings-row export-range-info">
+                <label className="export-settings-label">Selection</label>
+                <span className="export-range-label">
+                  {selectedClipIds.length > 0
+                    ? `${selectedClipIds.length} clip${selectedClipIds.length > 1 ? 's' : ''} selected`
+                    : 'No clips selected'}
+                </span>
+              </div>
+            )}
+
+            <div className="export-settings-row">
               <label className="export-settings-label">Resolution</label>
               <select
                 className="export-settings-select"
@@ -424,7 +512,11 @@ export default function App() {
               <button className="btn-export-cancel" onClick={() => setShowExportSettings(false)}>
                 Cancel
               </button>
-              <button className="btn-export" onClick={handleExport}>
+              <button
+                className="btn-export"
+                onClick={handleExport}
+                disabled={renderRangeMode === 'selectedClips' && selectedClipIds.length === 0}
+              >
                 Export
               </button>
             </div>

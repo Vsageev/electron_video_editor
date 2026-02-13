@@ -29,12 +29,13 @@ function findSnapTarget(raw: number, candidates: number[], threshold: number): n
 }
 
 export default memo(function TimelineClip({ clip, zoom, isSelected }: TimelineClipProps) {
-  const { selectClip, removeClip, updateClip, generateSubtitles, beginUndoBatch, endUndoBatch, setTrackInsertIndicator, insertTrackAndMoveClip, setDragInsertGhost } = useEditorStore();
+  const { selectClip, removeClip, updateClip, generateSubtitles, beginUndoBatch, endUndoBatch, setTrackInsertIndicator, insertTrackAndMoveClip, setDragInsertGhost, setCurrentTime } = useEditorStore();
   const tracks = useEditorStore((s) => s.tracks);
   const mediaFiles = useEditorStore((s) => s.mediaFiles);
   const timelineClips = useEditorStore((s) => s.timelineClips);
   const currentTime = useEditorStore((s) => s.currentTime);
   const autoSnapEnabled = useEditorStore((s) => s.autoSnapEnabled);
+  const rippleEnabled = useEditorStore((s) => s.rippleEnabled);
   const mediaType = mediaFiles.find((m) => m.path === clip.mediaPath)?.type ?? 'video';
 
   const [contextMenu, setContextMenu] = useState<{
@@ -153,22 +154,27 @@ export default memo(function TimelineClip({ clip, zoom, isSelected }: TimelineCl
           const endSnap = findSnapTarget(nextStart + clipDuration, candidates, snapThreshold);
           const startFromEndSnap = endSnap == null ? null : endSnap - clipDuration;
           const snapOptions = [
-            ...(startSnap == null ? [] : [startSnap]),
-            ...(startFromEndSnap == null ? [] : [startFromEndSnap]),
-          ].map((value) => Math.max(0, value));
+            ...(startSnap == null ? [] : [{ value: Math.max(0, startSnap), snapAt: startSnap }]),
+            ...(startFromEndSnap == null ? [] : [{ value: Math.max(0, startFromEndSnap), snapAt: endSnap! }]),
+          ];
 
           if (snapOptions.length > 0) {
             let best = snapOptions[0];
-            let bestDiff = Math.abs(best - nextStart);
+            let bestDiff = Math.abs(best.value - nextStart);
             for (const option of snapOptions) {
-              const diff = Math.abs(option - nextStart);
+              const diff = Math.abs(option.value - nextStart);
               if (diff < bestDiff) {
                 bestDiff = diff;
                 best = option;
               }
             }
-            nextStart = best;
+            nextStart = best.value;
+            useEditorStore.getState().setSnapLineX(best.snapAt * zoom);
+          } else {
+            useEditorStore.getState().setSnapLineX(null);
           }
+        } else {
+          useEditorStore.getState().setSnapLineX(null);
         }
 
         // If in insert mode, keep clip on its original track but show ghost
@@ -194,6 +200,7 @@ export default memo(function TimelineClip({ clip, zoom, isSelected }: TimelineCl
         }
         setTrackInsertIndicator(null);
         setDragInsertGhost(null);
+        useEditorStore.getState().setSnapLineX(null);
         endUndoBatch();
       };
 
@@ -213,6 +220,7 @@ export default memo(function TimelineClip({ clip, zoom, isSelected }: TimelineCl
       const origDuration = clip.duration;
       const origTrimStart = clip.trimStart;
       const origTrimEnd = clip.trimEnd;
+      const origCurrentTime = currentTime;
       const snapThreshold = SNAP_THRESHOLD_PX / zoom;
       const snapCandidates = autoSnapEnabled
         ? [
@@ -227,15 +235,18 @@ export default memo(function TimelineClip({ clip, zoom, isSelected }: TimelineCl
       // Components and images have no fixed source duration — allow free resize
       const isFlexDuration = mediaType === 'component' || mediaType === 'image';
 
+      // Track the previous end time for ripple shift calculations
+      let prevEnd = origStart + origDuration;
+
       beginUndoBatch();
 
       const onMove = (ev: MouseEvent) => {
         const dx = ev.clientX - startX;
         const dt = dx / zoom;
+        let snapAt: number | null = null;
 
         if (side === 'left') {
           if (isFlexDuration) {
-            // Flex: move startTime, shrink/grow duration, no trimStart concept needed
             const origEnd = origStart + origDuration;
             let startTime = origStart + dt;
             let duration = origDuration - dt;
@@ -255,9 +266,12 @@ export default memo(function TimelineClip({ clip, zoom, isSelected }: TimelineCl
                 duration = origEnd - clamped;
                 startTime = clamped;
                 if (duration < 0.1) { duration = 0.1; startTime = origEnd - 0.1; }
+                snapAt = snapped;
               }
             }
             updateClip(clip.id, { startTime, duration, originalDuration: duration });
+            // Trim preview: scrub to trim edge
+            setCurrentTime(startTime);
           } else {
             const newTrimStart = Math.max(0, origTrimStart + dt);
             const maxTrim = clip.originalDuration - clip.trimEnd - 0.1;
@@ -270,23 +284,43 @@ export default memo(function TimelineClip({ clip, zoom, isSelected }: TimelineCl
               if (snapped != null) {
                 startTime = clamp(snapped, minStart, maxStart);
                 trimStart = origTrimStart + (startTime - origStart);
+                snapAt = snapped;
               }
             }
             const duration = clip.originalDuration - trimStart - clip.trimEnd;
             updateClip(clip.id, { trimStart, duration, startTime });
+            // Trim preview: scrub to trim edge
+            setCurrentTime(startTime);
           }
         } else {
           if (isFlexDuration) {
-            // Flex: freely adjust duration with no upper bound
             let duration = Math.max(0.1, origDuration + dt);
             if (autoSnapEnabled) {
               const rawEnd = origStart + duration;
               const snapped = findSnapTarget(rawEnd, snapCandidates, snapThreshold);
               if (snapped != null) {
                 duration = Math.max(0.1, snapped - origStart);
+                snapAt = snapped;
               }
             }
+            const newEnd = origStart + duration;
             updateClip(clip.id, { duration, originalDuration: duration });
+            // Ripple: shift later clips by the end-time change
+            if (rippleEnabled) {
+              const shift = newEnd - prevEnd;
+              if (Math.abs(shift) > 0.001) {
+                const store = useEditorStore.getState();
+                const laterClips = store.timelineClips.filter(
+                  (c) => c.id !== clip.id && c.track === clip.track && c.startTime >= prevEnd - 0.001,
+                );
+                for (const c of laterClips) {
+                  updateClip(c.id, { startTime: Math.max(0, c.startTime + shift) });
+                }
+              }
+              prevEnd = newEnd;
+            }
+            // Trim preview: scrub to trim edge
+            setCurrentTime(origStart + duration);
           } else {
             const newTrimEnd = Math.max(0, origTrimEnd - dt);
             const maxTrim = clip.originalDuration - clip.trimStart - 0.1;
@@ -301,23 +335,47 @@ export default memo(function TimelineClip({ clip, zoom, isSelected }: TimelineCl
                 const endTime = clamp(snapped, minEnd, maxEnd);
                 duration = endTime - origStart;
                 trimEnd = clip.originalDuration - clip.trimStart - duration;
+                snapAt = snapped;
               }
             }
+            const newEnd = origStart + duration;
             updateClip(clip.id, { trimEnd, duration });
+            // Ripple: shift later clips by the end-time change
+            if (rippleEnabled) {
+              const shift = newEnd - prevEnd;
+              if (Math.abs(shift) > 0.001) {
+                const store = useEditorStore.getState();
+                const laterClips = store.timelineClips.filter(
+                  (c) => c.id !== clip.id && c.track === clip.track && c.startTime >= prevEnd - 0.001,
+                );
+                for (const c of laterClips) {
+                  updateClip(c.id, { startTime: Math.max(0, c.startTime + shift) });
+                }
+              }
+              prevEnd = newEnd;
+            }
+            // Trim preview: scrub to trim edge
+            setCurrentTime(origStart + duration);
           }
         }
+
+        // Show snap indicator line
+        useEditorStore.getState().setSnapLineX(snapAt != null ? snapAt * zoom : null);
       };
 
       const onUp = () => {
         document.removeEventListener('mousemove', onMove);
         document.removeEventListener('mouseup', onUp);
+        useEditorStore.getState().setSnapLineX(null);
+        // Restore currentTime after trim preview
+        setCurrentTime(origCurrentTime);
         endUndoBatch();
       };
 
       document.addEventListener('mousemove', onMove);
       document.addEventListener('mouseup', onUp);
     },
-    [clip, zoom, selectClip, updateClip, autoSnapEnabled, timelineClips, currentTime, beginUndoBatch, endUndoBatch]
+    [clip, zoom, selectClip, updateClip, autoSnapEnabled, timelineClips, currentTime, beginUndoBatch, endUndoBatch, rippleEnabled, setCurrentTime]
   );
 
   const handleContextMenu = useCallback(
@@ -326,6 +384,11 @@ export default memo(function TimelineClip({ clip, zoom, isSelected }: TimelineCl
       e.stopPropagation();
       selectClip(clip.id);
       const items: ContextMenuItem[] = [];
+      items.push({
+        label: 'Copy',
+        action: () => useEditorStore.getState().copySelectedClips(),
+      });
+      items.push({ divider: true });
       if (mediaType === 'video' || mediaType === 'audio') {
         items.push({
           label: 'Generate Subtitles',

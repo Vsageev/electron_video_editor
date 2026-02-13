@@ -119,7 +119,12 @@ export default function PropertiesSidebar() {
         updateClip(clip.id, { startTime: Math.max(0, val) });
       } else if (prop === 'duration') {
         const duration = Math.max(0.1, val);
-        updateClip(clip.id, { duration, originalDuration: duration });
+        // For looped clips, only update duration (keep originalDuration as source length)
+        if (clip.looped) {
+          updateClip(clip.id, { duration });
+        } else {
+          updateClip(clip.id, { duration, originalDuration: duration });
+        }
       } else if (prop === 'trimStart') {
         const trimStart = Math.max(0, Math.min(val, clip.originalDuration - clip.trimEnd - 0.1));
         const duration = clip.originalDuration - trimStart - clip.trimEnd;
@@ -186,7 +191,7 @@ export default function PropertiesSidebar() {
 
   const handleResetTransform = useCallback(() => {
     if (!clip) return;
-    updateClip(clip.id, { x: 0, y: 0, scale: 1, scaleX: 1, scaleY: 1, rotation: 0, keyframes: undefined, keyframeIdCounter: undefined });
+    updateClip(clip.id, { x: 0, y: 0, scale: 1, scaleX: 1, scaleY: 1, rotation: 0, flipX: false, flipY: false, keyframes: undefined, keyframeIdCounter: undefined });
   }, [clip, updateClip]);
 
   const handleMaskShapeChange = useCallback((shape: MaskShape) => {
@@ -485,7 +490,7 @@ export default function PropertiesSidebar() {
               </div>
               <div className="property-row">
                 <span className="property-label">Duration</span>
-                {clipMedia?.type === 'component' || clipMedia?.type === 'image' ? (
+                {clipMedia?.type === 'component' || clipMedia?.type === 'image' || clip.looped ? (
                   <DraggableNumberInput
                     step={0.1}
                     min={0.1}
@@ -497,10 +502,20 @@ export default function PropertiesSidebar() {
                 )}
               </div>
               {clipMedia?.type !== 'component' && clipMedia?.type !== 'image' && (
-                <div className="property-row">
-                  <span className="property-label">Original</span>
-                  <span className="property-value">{formatTime(clip.originalDuration)}</span>
-                </div>
+                <>
+                  <div className="property-row">
+                    <span className="property-label">Original</span>
+                    <span className="property-value">{formatTime(clip.originalDuration)}</span>
+                  </div>
+                  <div className="property-row">
+                    <span className="property-label">Loop</span>
+                    <input
+                      type="checkbox"
+                      checked={!!clip.looped}
+                      onChange={(e) => updateClip(clip.id, { looped: e.target.checked })}
+                    />
+                  </div>
+                </>
               )}
             </div>
 
@@ -520,6 +535,25 @@ export default function PropertiesSidebar() {
                   {renderTransformRow('Scale X', 'scaleX', '0.05', '0.1')}
                   {renderTransformRow('Scale Y', 'scaleY', '0.05', '0.1')}
                   {renderTransformRow('Rotation', 'rotation', '1')}
+                  <div className="property-row">
+                    <span className="property-label">Flip</span>
+                    <div style={{ display: 'flex', gap: 4 }}>
+                      <button
+                        className={`flip-toggle-btn${clip.flipX ? ' active' : ''}`}
+                        onClick={() => updateClip(clip.id, { flipX: !clip.flipX })}
+                        title="Flip Horizontal"
+                      >
+                        H
+                      </button>
+                      <button
+                        className={`flip-toggle-btn${clip.flipY ? ' active' : ''}`}
+                        onClick={() => updateClip(clip.id, { flipY: !clip.flipY })}
+                        title="Flip Vertical"
+                      >
+                        V
+                      </button>
+                    </div>
+                  </div>
                 </div>
 
                 <div className="property-group">
@@ -585,14 +619,27 @@ export default function PropertiesSidebar() {
                         const isCollapsed = !expandedGroups.has(timeKey);
                         return (
                           <div key={timeKey} className="keyframe-group">
-                            <button
-                              className="keyframe-group-header"
-                              onClick={() => toggleGroup(timeKey)}
-                            >
-                              <span className={`keyframe-group-chevron${isCollapsed ? '' : ' open'}`}>&#9654;</span>
-                              <span className="keyframe-group-time">{formatTime(group.time)}</span>
-                              <span className="keyframe-group-count">{group.entries.length} prop{group.entries.length !== 1 ? 's' : ''}</span>
-                            </button>
+                            <div className="keyframe-group-header-row">
+                              <button
+                                className="keyframe-group-header"
+                                onClick={() => toggleGroup(timeKey)}
+                              >
+                                <span className={`keyframe-group-chevron${isCollapsed ? '' : ' open'}`}>&#9654;</span>
+                                <span className="keyframe-group-time">{formatTime(group.time)}</span>
+                                <span className="keyframe-group-count">{group.entries.length} prop{group.entries.length !== 1 ? 's' : ''}</span>
+                              </button>
+                              <button
+                                className="keyframe-delete-btn"
+                                onClick={() => {
+                                  for (const { prop, kf } of group.entries) {
+                                    removeKeyframe(clip.id, prop, kf.id);
+                                  }
+                                }}
+                                title="Delete all keyframes at this time"
+                              >
+                                &times;
+                              </button>
+                            </div>
                             {!isCollapsed && (
                               <div className="keyframe-group-body">
                                 {group.entries.map(({ prop, kf }) => (

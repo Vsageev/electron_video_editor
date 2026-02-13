@@ -199,6 +199,8 @@ export default function MediaSidebar() {
     setDraggingMediaIndex,
   } = useEditorStore();
 
+  const [typeFilter, setTypeFilter] = useState<'all' | MediaFile['type']>('all');
+
   const [contextMenu, setContextMenu] = useState<{
     x: number;
     y: number;
@@ -587,6 +589,24 @@ export default function MediaSidebar() {
     [addClip, removeMediaFile, currentProject, doRemoveBackground]
   );
 
+  const filteredMedia = typeFilter === 'all'
+    ? mediaFiles
+    : mediaFiles.filter((m) => m?.type === typeFilter);
+
+  // Build chip list from actual media types present
+  const typeCounts = mediaFiles.reduce<Record<string, number>>((acc, m) => {
+    if (m?.type) acc[m.type] = (acc[m.type] || 0) + 1;
+    return acc;
+  }, {});
+
+  const filterChips: { key: 'all' | MediaFile['type']; label: string }[] = [
+    { key: 'all', label: 'All' },
+    ...(typeCounts.video ? [{ key: 'video' as const, label: 'Video' }] : []),
+    ...(typeCounts.audio ? [{ key: 'audio' as const, label: 'Audio' }] : []),
+    ...(typeCounts.image ? [{ key: 'image' as const, label: 'Image' }] : []),
+    ...(typeCounts.component ? [{ key: 'component' as const, label: 'Component' }] : []),
+  ];
+
   return (
     <aside className="sidebar">
       <div className="sidebar-header">
@@ -679,8 +699,26 @@ export default function MediaSidebar() {
           )}
         </div>
       )}
+      {mediaFiles.length > 0 && filterChips.length > 2 && (
+        <div className="media-filter-chips">
+          {filterChips.map((chip) => (
+            <button
+              key={chip.key}
+              className={`media-filter-chip${typeFilter === chip.key ? ' active' : ''}`}
+              onClick={() => setTypeFilter(chip.key)}
+            >
+              {chip.label}
+              {chip.key !== 'all' && <span className="media-filter-chip-count">{typeCounts[chip.key]}</span>}
+            </button>
+          ))}
+        </div>
+      )}
       <div className="media-list">
-        {mediaFiles.length === 0 ? (
+        {filteredMedia.length === 0 && mediaFiles.length > 0 ? (
+          <div className="media-empty">
+            <p>No {typeFilter} files</p>
+          </div>
+        ) : mediaFiles.length === 0 ? (
           <div className="media-empty">
             <svg width="32" height="32" viewBox="0 0 24 24" fill="none">
               <rect x="3" y="5" width="18" height="14" rx="2" stroke="currentColor" strokeWidth="1.5" />
@@ -692,7 +730,9 @@ export default function MediaSidebar() {
             </button>
           </div>
         ) : (
-          mediaFiles.map((media, idx) => (
+          filteredMedia.map((media) => {
+            const idx = mediaFiles.indexOf(media);
+            return (
             <div
               key={media.path}
               className={`media-item${idx === selectedMediaIndex ? ' selected' : ''}`}
@@ -748,7 +788,7 @@ export default function MediaSidebar() {
                 </div>
               </div>
             </div>
-          ))
+          );})
         )}
       </div>
       {/* Metadata Panel */}

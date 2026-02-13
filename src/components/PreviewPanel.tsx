@@ -45,14 +45,19 @@ function makeTransformStyle(
   sX = 1,
   sY = 1,
   rotation = 0,
+  flipX = false,
+  flipY = false,
 ): React.CSSProperties {
+  let transform = `translate(calc(-50% + ${x * bw}px), calc(-50% + ${y * bh}px))`;
+  if (rotation) transform += ` rotate(${rotation}deg)`;
+  if (flipX || flipY) transform += ` scale(${flipX ? -1 : 1}, ${flipY ? -1 : 1})`;
   return {
     position: 'absolute',
     width: bw * scale * sX,
     height: bh * scale * sY,
     left: '50%',
     top: '50%',
-    transform: `translate(calc(-50% + ${x * bw}px), calc(-50% + ${y * bh}px))${rotation ? ` rotate(${rotation}deg)` : ''}`,
+    transform,
   };
 }
 
@@ -235,9 +240,9 @@ export default function PreviewPanel() {
   }, [timelineClips, hasTimelineClips]);
 
   const showStandaloneVideo =
-    !hasTimelineClips && !!previewMediaPath && previewMediaType === 'video';
+    !!previewMediaPath && previewMediaType === 'video';
   const showStandaloneImage =
-    !hasTimelineClips && !!previewMediaPath && previewMediaType === 'image';
+    !!previewMediaPath && previewMediaType === 'image';
   const showStandalone = showStandaloneVideo || showStandaloneImage;
   const showPlaceholder = !hasTimelineClips && !showStandalone;
 
@@ -823,6 +828,7 @@ export default function PreviewPanel() {
   const showSingleHandles =
     selectedClip &&
     !isMultiSelect &&
+    !showStandalone &&
     visibleClips.some((c) => c.id === selectedClip.id);
 
   // Selected visible clips for group box
@@ -924,7 +930,7 @@ export default function PreviewPanel() {
         >
         <div className="canvas-rect" style={{ width: canvasSize.w, height: canvasSize.h }}>
         {/* Timeline composite: one ClipLayer per visible clip */}
-        {hasTimelineClips &&
+        {hasTimelineClips && !showStandalone &&
           visibleClips.map((clip) => {
             const mediaFile = getMediaFile(clip.mediaPath);
             const mediaType = mediaFile?.type ?? 'video';
@@ -941,7 +947,7 @@ export default function PreviewPanel() {
             const style: React.CSSProperties =
               base.w > 0
                 ? {
-                    ...makeTransformStyle(x, y, scale, base.w, base.h, scaleX, scaleY, rotation),
+                    ...makeTransformStyle(x, y, scale, base.w, base.h, scaleX, scaleY, rotation, !!clip.flipX, !!clip.flipY),
                     ...(animMask ? { overflow: 'hidden' } : {}),
                     ...(animMask ? { clipPath: buildClipPath(animMask) } : {}),
                     ...(animMask && animMask.feather > 0 ? { filter: `blur(${animMask.feather}px)` } : {}),
@@ -964,7 +970,7 @@ export default function PreviewPanel() {
             );
           })}
 
-        {/* Standalone preview (media sidebar click, no timeline clips) */}
+        {/* Standalone preview (media sidebar click) */}
         {showStandaloneVideo && (
           <video
             ref={standaloneRef}
