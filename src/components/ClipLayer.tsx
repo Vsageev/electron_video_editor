@@ -290,12 +290,12 @@ const ComponentRenderer = memo(function ComponentRenderer({
   // Compute fixed logical dimensions so the component always renders at the
   // same CSS-pixel size.  Preview visually scales via CSS transform.
   const { logicalW, logicalH, cssScale } = useMemo(() => {
-    const aspect = exportSettings.width / exportSettings.height;
+    const containerAspect = containerH > 0 ? containerW / containerH : exportSettings.width / exportSettings.height;
     const lw = COMPONENT_LOGICAL_BASE;
-    const lh = COMPONENT_LOGICAL_BASE / aspect;
+    const lh = COMPONENT_LOGICAL_BASE / containerAspect;
     const s = containerW > 0 ? containerW / lw : 1;
     return { logicalW: lw, logicalH: lh, cssScale: s };
-  }, [exportSettings.width, exportSettings.height, containerW]);
+  }, [exportSettings.width, exportSettings.height, containerW, containerH]);
 
   const clipProps: ComponentClipProps = useMemo(() => ({
     currentTime,

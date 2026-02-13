@@ -501,13 +501,13 @@ export default function PreviewPanel() {
           const newSX = Math.max(0.1, origScaleX + (dx * sign) / (effectiveW * 0.5));
           const dSX = newSX - origScaleX;
           setTransformProp(id, 'scaleX', newSX, clipLocalTime);
-          setTransformProp(id, 'x', origXPos + (dir === 'w' ? dSX * anim.scale * 0.5 : -dSX * anim.scale * 0.5), clipLocalTime);
+          setTransformProp(id, 'x', origXPos + (dir === 'e' ? dSX * anim.scale * 0.5 : -dSX * anim.scale * 0.5), clipLocalTime);
         } else {
           const sign = dir === 'n' ? -1 : 1;
           const newSY = Math.max(0.1, origScaleY + (dy * sign) / (effectiveH * 0.5));
           const dSY = newSY - origScaleY;
           setTransformProp(id, 'scaleY', newSY, clipLocalTime);
-          setTransformProp(id, 'y', origYPos + (dir === 'n' ? dSY * anim.scale * 0.5 : -dSY * anim.scale * 0.5), clipLocalTime);
+          setTransformProp(id, 'y', origYPos + (dir === 's' ? dSY * anim.scale * 0.5 : -dSY * anim.scale * 0.5), clipLocalTime);
         }
       };
       const onUp = () => {

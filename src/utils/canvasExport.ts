@@ -1,5 +1,5 @@
 import { Muxer, ArrayBufferTarget } from 'webm-muxer';
-import type { TimelineClip, MediaFile, ComponentClipProps, PropDefinition } from '../types';
+import type { TimelineClip, MediaFile, ComponentClipProps, PropDefinition, ClipMask } from '../types';
 import { getAnimatedTransform, getAnimatedMask } from './keyframeEngine';
 import { loadComponent } from './componentLoader';
 import { filePathToFileUrl } from './fileUrl';
@@ -8,6 +8,10 @@ import React from 'react';
 import { createRoot } from 'react-dom/client';
 import { flushSync } from 'react-dom';
 
+// ---------------------------------------------------------------------------
+// Pure helpers — copied from PreviewPanel to guarantee identical output
+// ---------------------------------------------------------------------------
+
 function fitSize(nw: number, nh: number, cw: number, ch: number) {
   if (!nw || !nh || !cw || !ch) return { w: 0, h: 0 };
   const aspect = nw / nh;
@@ -15,6 +19,59 @@ function fitSize(nw: number, nh: number, cw: number, ch: number) {
     ? { w: cw, h: cw / aspect }
     : { w: ch * aspect, h: ch };
 }
+
+function makeTransformStyle(
+  x: number,
+  y: number,
+  scale: number,
+  bw: number,
+  bh: number,
+  sX = 1,
+  sY = 1,
+  rotation = 0,
+): React.CSSProperties {
+  return {
+    position: 'absolute',
+    width: bw * scale * sX,
+    height: bh * scale * sY,
+    left: '50%',
+    top: '50%',
+    transform: `translate(calc(-50% + ${x * bw}px), calc(-50% + ${y * bh}px))${rotation ? ` rotate(${rotation}deg)` : ''}`,
+  };
+}
+
+function buildClipPath(mask: ClipMask): string {
+  const cx = mask.centerX * 100;
+  const cy = mask.centerY * 100;
+  const hw = (mask.width / 2) * 100;
+  const hh = (mask.height / 2) * 100;
+
+  if (mask.shape === 'ellipse') {
+    const inner = `ellipse(${hw}% ${hh}% at ${cx}% ${cy}%)`;
+    if (!mask.invert) return inner;
+    return `polygon(evenodd, 0% 0%, 100% 0%, 100% 100%, 0% 100%, 0% 0%, ${cx - hw}% ${cy}%, ${cx}% ${cy - hh}%, ${cx + hw}% ${cy}%, ${cx}% ${cy + hh}%, ${cx - hw}% ${cy}%)`;
+  }
+
+  const top = cy - hh;
+  const right = 100 - (cx + hw);
+  const bottom = 100 - (cy + hh);
+  const left = cx - hw;
+  const r = mask.borderRadius * Math.min(hw, hh) * 2;
+  const rStr = r > 0 ? ` round ${r}%` : '';
+
+  if (!mask.invert) {
+    return `inset(${top}% ${right}% ${bottom}% ${left}%${rStr})`;
+  }
+  const l = left;
+  const t = top;
+  const rr = 100 - right;
+  const bb = 100 - bottom;
+  return `polygon(evenodd, 0% 0%, 100% 0%, 100% 100%, 0% 100%, 0% 0%, ${l}% ${t}%, ${rr}% ${t}%, ${rr}% ${bb}%, ${l}% ${bb}%, ${l}% ${t}%)`;
+}
+
+// ---------------------------------------------------------------------------
+// Media helpers
+// ---------------------------------------------------------------------------
 
 function waitForSeek(video: HTMLVideoElement, time: number): Promise<void> {
   return new Promise((resolve) => {
@@ -63,87 +120,9 @@ async function captureVideoFrame(video: HTMLVideoElement, time: number): Promise
   return c.toDataURL('image/png');
 }
 
-function drawMaskShapePath(
-  ctx: CanvasRenderingContext2D,
-  drawX: number,
-  drawY: number,
-  drawW: number,
-  drawH: number,
-  mask: NonNullable<ReturnType<typeof getAnimatedMask>>,
-) {
-  const mcx = drawX + mask.centerX * drawW;
-  const mcy = drawY + mask.centerY * drawH;
-  const mw = (mask.width / 2) * drawW;
-  const mh = (mask.height / 2) * drawH;
-  if (mask.shape === 'ellipse') {
-    ctx.ellipse(mcx, mcy, mw, mh, 0, 0, Math.PI * 2);
-    return;
-  }
-
-  const rx = mask.borderRadius * Math.min(mw, mh) * 2;
-  if (rx > 0) {
-    const lx = mcx - mw;
-    const ly = mcy - mh;
-    const rw = mw * 2;
-    const rh = mh * 2;
-    ctx.moveTo(lx + rx, ly);
-    ctx.lineTo(lx + rw - rx, ly);
-    ctx.arcTo(lx + rw, ly, lx + rw, ly + rx, rx);
-    ctx.lineTo(lx + rw, ly + rh - rx);
-    ctx.arcTo(lx + rw, ly + rh, lx + rw - rx, ly + rh, rx);
-    ctx.lineTo(lx + rx, ly + rh);
-    ctx.arcTo(lx, ly + rh, lx, ly + rh - rx, rx);
-    ctx.lineTo(lx, ly + rx);
-    ctx.arcTo(lx, ly, lx + rx, ly, rx);
-    ctx.closePath();
-    return;
-  }
-
-  ctx.rect(mcx - mw, mcy - mh, mw * 2, mh * 2);
-}
-
-function withTransformAndMask(
-  ctx: CanvasRenderingContext2D,
-  drawX: number,
-  drawY: number,
-  drawW: number,
-  drawH: number,
-  rotation: number,
-  mask: NonNullable<ReturnType<typeof getAnimatedMask>> | null,
-  draw: () => void,
-) {
-  const hasRotation = rotation !== 0;
-  if (hasRotation) {
-    ctx.save();
-    ctx.translate(drawX + drawW / 2, drawY + drawH / 2);
-    ctx.rotate((rotation * Math.PI) / 180);
-    ctx.translate(-(drawX + drawW / 2), -(drawY + drawH / 2));
-  }
-
-  if (mask) {
-    ctx.save();
-    ctx.beginPath();
-    if (mask.invert) {
-      ctx.rect(drawX, drawY, drawW, drawH);
-    }
-    drawMaskShapePath(ctx, drawX, drawY, drawW, drawH, mask);
-    ctx.clip(mask.invert ? 'evenodd' : 'nonzero');
-  }
-
-  const prevFilter = ctx.filter;
-  if (mask && mask.feather > 0) {
-    ctx.filter = `blur(${mask.feather}px)`;
-  }
-  draw();
-  ctx.filter = prevFilter;
-
-  if (mask) {
-    ctx.restore();
-  }
-  if (hasRotation) {
-    ctx.restore();
-  }
-}
+// ---------------------------------------------------------------------------
+// Component prop resolution for export
+// ---------------------------------------------------------------------------
 
 type ComponentEntry = {
   Component: React.ComponentType<any>;
@@ -189,8 +168,6 @@ export function resolveComponentPropsForExport(
         resolved[key] = null;
       }
     } else if (media.type === 'video') {
-      // Use pre-captured frame data URL so html-to-image can rasterize it
-      // (html-to-image cannot reliably capture <video> elements)
       const frameUrl = videoFrameUrls?.get(media.path);
       resolved[key] = React.createElement('img', {
         src: frameUrl || filePathToFileUrl(media.path),
@@ -212,6 +189,10 @@ export function resolveComponentPropsForExport(
 
   return resolved;
 }
+
+// ---------------------------------------------------------------------------
+// Main export
+// ---------------------------------------------------------------------------
 
 export async function exportToVideo(
   clips: TimelineClip[],
@@ -256,7 +237,7 @@ export async function exportToVideo(
   const totalFrames = Math.ceil(totalDuration * fps);
   const frameDuration = 1 / fps;
 
-  // Create canvas
+  // Final compositing canvas for VideoEncoder
   const canvas = document.createElement('canvas');
   canvas.width = width;
   canvas.height = height;
@@ -264,19 +245,21 @@ export async function exportToVideo(
 
   // Load all video elements
   const videoElements: Map<number, HTMLVideoElement> = new Map();
+  const videoNaturalSizes: Map<number, { w: number; h: number }> = new Map();
   await Promise.all(
     videoClips.map(async (clip) => {
       const video = await loadVideo(filePathToFileUrl(clip.mediaPath));
       videoElements.set(clip.id, video);
+      videoNaturalSizes.set(clip.id, { w: video.videoWidth, h: video.videoHeight });
     }),
   );
 
-  // Load all image elements
-  const imageElements: Map<number, HTMLImageElement> = new Map();
+  // Load all image elements and capture natural sizes
+  const imageNaturalSizes: Map<number, { w: number; h: number }> = new Map();
   await Promise.all(
     imageClips.map(async (clip) => {
       const img = await loadImage(filePathToFileUrl(clip.mediaPath));
-      imageElements.set(clip.id, img);
+      imageNaturalSizes.set(clip.id, { w: img.naturalWidth, h: img.naturalHeight });
     }),
   );
 
@@ -309,8 +292,6 @@ export async function exportToVideo(
   }
 
   // Pre-load videos referenced as media props inside component clips
-  // so we can seek + capture frames per-frame instead of using <video> elements
-  // (html-to-image cannot reliably rasterize <video>).
   const mediaPropVideos: Map<string, HTMLVideoElement> = new Map();
   for (const clip of componentClips) {
     const entry = componentEntriesByClipId.get(clip.id);
@@ -331,18 +312,12 @@ export async function exportToVideo(
     }
   }
 
-  // Offscreen container for component rasterization.
-  // The outer wrapper is invisible (opacity:0) but still painted by the browser,
-  // so html-to-image can read accurate computed styles on the inner content.
-  // opacity on the parent does NOT propagate to the cloned node's inline styles.
+  // Offscreen container for DOM-based rasterization
   const offscreenDiv = document.createElement('div');
   offscreenDiv.style.cssText = `position:fixed;left:0;top:0;pointer-events:none;opacity:0;`;
   document.body.appendChild(offscreenDiv);
-  // Inner content div — the rasterization target, sized per-frame.
-  // Mirrors the preview's CSS context (.canvas-rect): position:relative, overflow:hidden,
-  // box-sizing:border-box so layout matches what the user sees in the preview panel.
   const offscreenContent = document.createElement('div');
-  offscreenContent.style.cssText = `position:relative;margin:0;padding:0;box-sizing:border-box;overflow:hidden;background:#000;`;
+  offscreenContent.style.cssText = `position:relative;margin:0;padding:0;box-sizing:border-box;overflow:hidden;background:#000;width:${width}px;height:${height}px;`;
   offscreenDiv.appendChild(offscreenContent);
   const offscreenRoot = createRoot(offscreenContent);
 
@@ -384,88 +359,113 @@ export async function exportToVideo(
     framerate: fps,
   });
 
+  const LOGICAL_BASE = 960;
+  const exportAspect = width / height;
+
   // Render video frame by frame
   for (let frameIdx = 0; frameIdx < totalFrames; frameIdx++) {
     if (abortSignal.aborted) break;
 
     const timelineTime = frameIdx * frameDuration;
 
-    // Clear canvas to black
-    ctx.fillStyle = '#000000';
-    ctx.fillRect(0, 0, width, height);
-
-    // Draw each visible clip in the same track stack order as preview.
-    for (const clip of sortedRenderableClips) {
+    // Find visible clips at this frame
+    const visibleClips = sortedRenderableClips.filter((clip) => {
       const clipEnd = clip.startTime + clip.duration;
-      if (timelineTime < clip.startTime || timelineTime >= clipEnd) {
-        continue;
-      }
+      return timelineTime >= clip.startTime && timelineTime < clipEnd;
+    });
 
+    // Capture video frames as data URLs (html-to-image can't rasterize <video>)
+    const videoFrameDataUrls: Map<number, string> = new Map();
+    for (const clip of visibleClips) {
+      if (getMediaType(clip) !== 'video') continue;
+      const video = videoElements.get(clip.id)!;
+      const clipLocalTime = clip.trimStart + (timelineTime - clip.startTime);
+      const dataUrl = await captureVideoFrame(video, clipLocalTime);
+      videoFrameDataUrls.set(clip.id, dataUrl);
+    }
+
+    // Also capture frames for video media props inside component clips
+    const mediaPropFrameUrls: Map<string, string> = new Map();
+    for (const clip of visibleClips) {
+      if (getMediaType(clip) !== 'component') continue;
+      const entry = componentEntriesByClipId.get(clip.id);
+      if (!entry?.propDefinitions || !clip.componentProps) continue;
+      const currentTime = timelineTime - clip.startTime;
+      for (const [key, def] of Object.entries(entry.propDefinitions)) {
+        if (def.type !== 'media') continue;
+        const path = clip.componentProps[key];
+        if (!path || mediaPropFrameUrls.has(path)) continue;
+        const media = mediaByPath.get(path);
+        if (media?.type !== 'video') continue;
+        const video = mediaPropVideos.get(path);
+        if (video) {
+          mediaPropFrameUrls.set(path, await captureVideoFrame(video, currentTime));
+        }
+      }
+    }
+
+    // Build React element tree mirroring PreviewPanel's .canvas-rect structure
+    const clipElements: React.ReactElement[] = [];
+
+    for (const clip of visibleClips) {
       const mediaType = getMediaType(clip);
+      const animTime = timelineTime - clip.startTime;
+      const { x, y, scale, scaleX, scaleY, rotation } = getAnimatedTransform(clip, animTime);
+      const animMask = getAnimatedMask(clip, animTime);
+
+      // Compute base size — same logic as PreviewPanel
+      let base: { w: number; h: number };
       if (mediaType === 'video') {
-        const clipLocalTime = clip.trimStart + (timelineTime - clip.startTime);
-        const video = videoElements.get(clip.id)!;
-
-        await waitForSeek(video, clipLocalTime);
-
-        const nw = video.videoWidth;
-        const nh = video.videoHeight;
-        const base = fitSize(nw, nh, width, height);
-        const animTime = timelineTime - clip.startTime;
-        const { x, y, scale, scaleX, scaleY, rotation } = getAnimatedTransform(clip, animTime);
-        const scaledW = base.w * scale * scaleX;
-        const scaledH = base.h * scale * scaleY;
-        const drawX = (width - scaledW) / 2 + x * base.w;
-        const drawY = (height - scaledH) / 2 + y * base.h;
-        const mask = getAnimatedMask(clip, animTime);
-        withTransformAndMask(ctx, drawX, drawY, scaledW, scaledH, rotation, mask, () => {
-          ctx.drawImage(video, drawX, drawY, scaledW, scaledH);
-        });
-        continue;
+        const nat = videoNaturalSizes.get(clip.id);
+        base = nat ? fitSize(nat.w, nat.h, width, height) : { w: width, h: height };
+      } else if (mediaType === 'image') {
+        const nat = imageNaturalSizes.get(clip.id);
+        base = nat ? fitSize(nat.w, nat.h, width, height) : { w: width, h: height };
+      } else {
+        // component — base is canvas size
+        base = { w: width, h: height };
       }
 
-      if (mediaType === 'image') {
-        const img = imageElements.get(clip.id)!;
-        const nw = img.naturalWidth;
-        const nh = img.naturalHeight;
-        const base = fitSize(nw, nh, width, height);
-        const animTime = timelineTime - clip.startTime;
-        const { x, y, scale, scaleX, scaleY, rotation } = getAnimatedTransform(clip, animTime);
-        const scaledW = base.w * scale * scaleX;
-        const scaledH = base.h * scale * scaleY;
-        const drawX = (width - scaledW) / 2 + x * base.w;
-        const drawY = (height - scaledH) / 2 + y * base.h;
-        const mask = getAnimatedMask(clip, animTime);
-        withTransformAndMask(ctx, drawX, drawY, scaledW, scaledH, rotation, mask, () => {
-          ctx.drawImage(img, drawX, drawY, scaledW, scaledH);
-        });
-        continue;
-      }
+      // Build transform style — identical to PreviewPanel
+      const style: React.CSSProperties = base.w > 0
+        ? {
+            ...makeTransformStyle(x, y, scale, base.w, base.h, scaleX, scaleY, rotation),
+            ...(animMask ? { overflow: 'hidden' as const } : {}),
+            ...(animMask ? { clipPath: buildClipPath(animMask) } : {}),
+            ...(animMask && animMask.feather > 0 ? { filter: `blur(${animMask.feather}px)` } : {}),
+          }
+        : { position: 'absolute' as const, opacity: 0, pointerEvents: 'none' as const };
 
-      if (mediaType === 'component') {
+      let content: React.ReactElement;
+
+      if (mediaType === 'video') {
+        const dataUrl = videoFrameDataUrls.get(clip.id)!;
+        content = React.createElement('img', {
+          src: dataUrl,
+          style: { width: '100%', height: '100%', objectFit: 'contain' },
+          draggable: false,
+        });
+      } else if (mediaType === 'image') {
+        content = React.createElement('img', {
+          src: filePathToFileUrl(clip.mediaPath),
+          style: { width: '100%', height: '100%', objectFit: 'contain' },
+          draggable: false,
+        });
+      } else {
+        // component
         const entry = componentEntriesByClipId.get(clip.id);
         if (!entry) continue;
-        const Component = entry.Component;
 
-        const currentTime = timelineTime - clip.startTime;
+        const currentTime = animTime;
         const progress = clip.duration > 0 ? currentTime / clip.duration : 0;
-        const animTime = timelineTime - clip.startTime;
-        const { x, y, scale, scaleX, scaleY, rotation } = getAnimatedTransform(clip, animTime);
-        const scaledW = width * scale * scaleX;
-        const scaledH = height * scale * scaleY;
-        const drawX = (width - scaledW) / 2 + x * width;
-        const drawY = (height - scaledH) / 2 + y * height;
-        const mask = getAnimatedMask(clip, animTime);
+        const containerW = base.w * scale * scaleX;
+        const containerH = base.h * scale * scaleY;
 
-        // Render the component DOM at a fixed logical size (matching the
-        // preview's COMPONENT_LOGICAL_BASE) so that CSS pixel values (padding,
-        // font-size, border, etc.) produce identical proportions in both preview
-        // and export.  html-to-image upscales to export resolution via pixelRatio.
-        const LOGICAL_BASE = 960;
-        const aspect = width / height;
-        const logicalW = LOGICAL_BASE * scale * scaleX;
-        const logicalH = (LOGICAL_BASE / aspect) * scale * scaleY;
-        const renderPixelRatio = scaledW / logicalW;
+        // Same logical sizing as ComponentRenderer in ClipLayer
+        const logicalW = LOGICAL_BASE;
+        const containerAspect = containerH > 0 ? containerW / containerH : exportAspect;
+        const logicalH = LOGICAL_BASE / containerAspect;
+        const cssScale = containerW > 0 ? containerW / logicalW : 1;
 
         const clipProps: ComponentClipProps = {
           currentTime,
@@ -474,21 +474,6 @@ export async function exportToVideo(
           height: logicalH,
           progress,
         };
-        // Capture current frame of any video media props as data-URL images
-        const videoFrameUrls = new Map<string, string>();
-        if (entry.propDefinitions && clip.componentProps) {
-          for (const [key, def] of Object.entries(entry.propDefinitions)) {
-            if (def.type !== 'media') continue;
-            const path = clip.componentProps[key];
-            if (!path) continue;
-            const media = mediaByPath.get(path);
-            if (media?.type !== 'video') continue;
-            const video = mediaPropVideos.get(path);
-            if (video) {
-              videoFrameUrls.set(path, await captureVideoFrame(video, currentTime));
-            }
-          }
-        }
 
         const resolvedProps = resolveComponentPropsForExport(
           clip.componentProps,
@@ -496,45 +481,67 @@ export async function exportToVideo(
           clipProps,
           mediaByPath,
           componentEntriesByMediaPath,
-          videoFrameUrls,
+          mediaPropFrameUrls,
         );
 
-        try {
-          // Size the content container to the logical (CSS) dimensions
-          offscreenContent.style.width = `${logicalW}px`;
-          offscreenContent.style.height = `${logicalH}px`;
-
-          // Match preview DOM structure: ComponentRenderer wraps in
-          // <div style={{width:'100%',height:'100%'}}> <Component/> </div>
-          flushSync(() => {
-            offscreenRoot.render(
-              React.createElement('div', { style: { width: '100%', height: '100%' } },
-                React.createElement(Component, {
-                  ...clipProps,
-                  ...resolvedProps,
-                }),
-              ),
-            );
-          });
-
-          // Wait for the browser to paint the rendered content
-          await new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r())));
-
-          // Rasterize at logical size, upscaled to full export resolution via pixelRatio
-          const rasterCanvas = await toCanvas(offscreenContent, {
-            width: logicalW,
-            height: logicalH,
-            pixelRatio: renderPixelRatio,
-            skipAutoScale: true,
-          });
-          withTransformAndMask(ctx, drawX, drawY, scaledW, scaledH, rotation, mask, () => {
-            ctx.drawImage(rasterCanvas, drawX, drawY, scaledW, scaledH);
-          });
-        } catch (e) {
-          console.warn(`Component rasterization failed for ${clip.mediaName}:`, e);
-        }
+        // Mirror ClipLayer's ComponentRenderer DOM structure:
+        // <div style={{width:'100%',height:'100%',overflow:'hidden'}}>
+        //   <div style={{width:logicalW,height:logicalH,transform:scale(cssScale),transformOrigin:'top left'}}>
+        //     <Component {...clipProps} {...resolvedProps} />
+        //   </div>
+        // </div>
+        content = React.createElement('div', {
+          style: { width: '100%', height: '100%', overflow: 'hidden' },
+        },
+          React.createElement('div', {
+            style: {
+              width: logicalW,
+              height: logicalH,
+              transform: `scale(${cssScale})`,
+              transformOrigin: 'top left',
+            },
+          },
+            React.createElement(entry.Component, {
+              ...clipProps,
+              ...resolvedProps,
+            }),
+          ),
+        );
       }
+
+      clipElements.push(
+        React.createElement('div', { key: clip.id, style }, content),
+      );
     }
+
+    // Build the full composite tree (mirrors .canvas-rect)
+    const compositeTree = React.createElement('div', {
+      style: {
+        width: '100%',
+        height: '100%',
+        position: 'relative',
+      },
+    }, ...clipElements);
+
+    // Render into offscreen container
+    flushSync(() => {
+      offscreenRoot.render(compositeTree);
+    });
+
+    // Wait for browser to paint
+    await new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r())));
+
+    // Rasterize the entire composite at export resolution
+    const rasterCanvas = await toCanvas(offscreenContent, {
+      width,
+      height,
+      pixelRatio: 1,
+      skipAutoScale: true,
+    });
+
+    // Draw onto the encoding canvas
+    ctx.clearRect(0, 0, width, height);
+    ctx.drawImage(rasterCanvas, 0, 0);
 
     // Create VideoFrame and encode
     const timestamp = frameIdx * frameDuration * 1_000_000; // microseconds
@@ -568,7 +575,6 @@ export async function exportToVideo(
   });
 
   // Collect audio sources from video media props inside component clips.
-  // These inherit the parent component clip's timeline position.
   type AudioSource = { mediaPath: string; startTime: number; trimStart: number; duration: number; mediaName: string };
   const extraAudioSources: AudioSource[] = [];
   for (const clip of componentClips) {
@@ -602,10 +608,9 @@ export async function exportToVideo(
   muxer.finalize();
   videoEncoder.close();
 
-  // Clean up video/image elements, media-prop videos, and offscreen container
+  // Clean up video elements, media-prop videos, and offscreen container
   for (const v of videoElements.values()) v.src = '';
   for (const v of mediaPropVideos.values()) v.src = '';
-  for (const img of imageElements.values()) img.src = '';
   offscreenRoot.unmount();
   offscreenDiv.remove();
 
