@@ -408,11 +408,9 @@ export default function Timeline() {
       const target = e.target as HTMLElement;
       // Only show on empty track area, not on clips, ruler, or toolbar
       if (target.closest('.timeline-clip') || target.closest('.time-ruler') || target.closest('.timeline-toolbar')) return;
-      // Must be inside a track-content area
-      if (!target.closest('.track-content')) return;
+      // Must be inside a track-content or timeline-tracks-scroll area
+      if (!target.closest('.track-content') && !target.closest('.timeline-tracks-scroll')) return;
       e.preventDefault();
-      const s = useEditorStore.getState();
-      if (s.clipboardClips.length === 0) return;
       setTrackCtx({ x: e.clientX, y: e.clientY });
     },
     []
@@ -612,18 +610,6 @@ export default function Timeline() {
           </div>
         )}
 
-        {/* Track area context menu (paste) */}
-        {trackCtx && (
-          <div
-            className="context-menu"
-            style={{ position: 'fixed', left: trackCtx.x, top: trackCtx.y, zIndex: 100 }}
-          >
-            <div className="context-menu-item" onClick={() => { useEditorStore.getState().pasteClips(); setTrackCtx(null); }}>
-              Paste
-            </div>
-          </div>
-        )}
-
         {/* Snap indicator line */}
         {snapLineX != null && (
           <div className="snap-indicator-line" style={{ transform: `translateX(${snapLineX}px)` }} />
@@ -730,6 +716,24 @@ export default function Timeline() {
           )}
         </div>
       </div>
+
+      {/* Track area context menu (paste) — rendered outside timeline-container to avoid overflow clipping */}
+      {trackCtx && (
+        <div
+          className="context-menu"
+          style={{ position: 'fixed', left: trackCtx.x, top: trackCtx.y, zIndex: 100 }}
+        >
+          <div
+            className="context-menu-item"
+            onClick={() => {
+              useEditorStore.getState().pasteClips();
+              setTrackCtx(null);
+            }}
+          >
+            Paste
+          </div>
+        </div>
+      )}
     </div>
   );
 }

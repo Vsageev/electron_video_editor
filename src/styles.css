@@ -233,6 +233,15 @@ body {
   border-color: var(--border-focus);
 }
 
+.export-checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
 .export-settings-actions {
   display: flex;
   justify-content: flex-end;
@@ -902,6 +911,10 @@ body {
 .property-reset-btn:hover {
   color: var(--text-primary);
   border-color: var(--text-tertiary);
+}
+.property-reset-btn.active {
+  color: var(--accent);
+  border-color: var(--accent);
 }
 
 .property-row {

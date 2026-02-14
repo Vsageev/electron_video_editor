@@ -45,7 +45,7 @@ function makeTransformStyle(
   };
 }
 
-function buildClipPath(mask: ClipMask): string {
+function buildClipPath(mask: ClipMask, elW?: number, elH?: number): string {
   const cx = mask.centerX * 100;
   const cy = mask.centerY * 100;
   const hw = (mask.width / 2) * 100;
@@ -61,8 +61,20 @@ function buildClipPath(mask: ClipMask): string {
   const right = 100 - (cx + hw);
   const bottom = 100 - (cy + hh);
   const left = cx - hw;
-  const r = mask.borderRadius * Math.min(hw, hh) * 2;
-  const rStr = r > 0 ? ` round ${r}%` : '';
+  let rStr = '';
+  if (mask.borderRadius > 0) {
+    if (elW && elH && elW > 0 && elH > 0) {
+      const hwPx = (mask.width / 2) * elW;
+      const hhPx = (mask.height / 2) * elH;
+      const rPx = mask.borderRadius * Math.min(hwPx, hhPx) * 2;
+      const rH = (rPx / elW) * 100;
+      const rV = (rPx / elH) * 100;
+      rStr = ` round ${rH}% / ${rV}%`;
+    } else {
+      const r = mask.borderRadius * Math.min(hw, hh) * 2;
+      rStr = ` round ${r}%`;
+    }
+  }
 
   if (!mask.invert) {
     return `inset(${top}% ${right}% ${bottom}% ${left}%${rStr})`;
@@ -72,6 +84,57 @@ function buildClipPath(mask: ClipMask): string {
   const rr = 100 - right;
   const bb = 100 - bottom;
   return `polygon(evenodd, 0% 0%, 100% 0%, 100% 100%, 0% 100%, 0% 0%, ${l}% ${t}%, ${rr}% ${t}%, ${rr}% ${bb}%, ${l}% ${bb}%, ${l}% ${t}%)`;
+}
+
+function buildFeatheredMaskStyle(mask: ClipMask, elW: number, elH: number): React.CSSProperties {
+  if (elW <= 0 || elH <= 0) return { clipPath: buildClipPath(mask, elW, elH) };
+
+  const cx = mask.centerX * elW;
+  const cy = mask.centerY * elH;
+  const hw = (mask.width / 2) * elW;
+  const hh = (mask.height / 2) * elH;
+  const feather = mask.feather;
+  const pad = feather * 3;
+
+  let shapeEl: string;
+  if (mask.shape === 'ellipse') {
+    shapeEl = `<ellipse cx="${cx}" cy="${cy}" rx="${hw}" ry="${hh}" fill="white"/>`;
+  } else {
+    const r = mask.borderRadius * Math.min(hw, hh) * 2;
+    shapeEl = `<rect x="${cx - hw}" y="${cy - hh}" width="${hw * 2}" height="${hh * 2}" rx="${r}" ry="${r}" fill="white"/>`;
+  }
+
+  let maskContent: string;
+  if (mask.invert) {
+    maskContent = `<rect width="${elW}" height="${elH}" fill="white"/><g filter="url(%23feather)">${shapeEl.replace('fill="white"', 'fill="black"')}</g>`;
+  } else {
+    maskContent = `<g filter="url(%23feather)">${shapeEl}</g>`;
+  }
+
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${elW} ${elH}">`
+    + `<defs>`
+    + `<filter id="feather" x="${-pad}" y="${-pad}" width="${elW + pad * 2}" height="${elH + pad * 2}" filterUnits="userSpaceOnUse">`
+    + `<feGaussianBlur stdDeviation="${feather}"/>`
+    + `</filter>`
+    + `</defs>`
+    + `<mask id="m">${maskContent}</mask>`
+    + `<rect width="${elW}" height="${elH}" mask="url(%23m)" fill="white"/>`
+    + `</svg>`;
+
+  const encoded = `url("data:image/svg+xml,${svg}")`;
+  return {
+    WebkitMaskImage: encoded,
+    maskImage: encoded,
+    WebkitMaskSize: '100% 100%',
+    maskSize: '100% 100%',
+  } as React.CSSProperties;
+}
+
+function buildMaskStyle(mask: ClipMask, elW: number, elH: number): React.CSSProperties {
+  if (mask.feather > 0) {
+    return buildFeatheredMaskStyle(mask, elW, elH);
+  }
+  return { clipPath: buildClipPath(mask, elW, elH) };
 }
 
 // ---------------------------------------------------------------------------
@@ -316,6 +379,7 @@ export async function exportToVideo(
   tracks: number[] = [],
   renderStart: number = 0,
   renderEnd?: number,
+  transparentBg: boolean = false,
 ): Promise<Blob> {
   const mediaByPath = new Map(mediaFiles.map((m) => [m.path, m]));
   const getMediaType = (clip: TimelineClip) => {
@@ -356,7 +420,7 @@ export async function exportToVideo(
   const canvas = document.createElement('canvas');
   canvas.width = width;
   canvas.height = height;
-  const ctx = canvas.getContext('2d')!;
+  const ctx = canvas.getContext('2d', { willReadFrequently: false })!;
 
   // Load all video elements
   const videoElements: Map<number, HTMLVideoElement> = new Map();
@@ -434,7 +498,7 @@ export async function exportToVideo(
   offscreenDiv.style.cssText = `position:fixed;left:0;top:0;pointer-events:none;opacity:0;`;
   document.body.appendChild(offscreenDiv);
   const offscreenContent = document.createElement('div');
-  offscreenContent.style.cssText = `position:relative;margin:0;padding:0;box-sizing:border-box;overflow:hidden;background:#000;width:${width}px;height:${height}px;`;
+  offscreenContent.style.cssText = `position:relative;margin:0;padding:0;box-sizing:border-box;overflow:hidden;background:${transparentBg ? 'transparent' : '#000'};width:${width}px;height:${height}px;`;
   offscreenDiv.appendChild(offscreenContent);
   const offscreenRoot = createRoot(offscreenContent);
 
@@ -546,12 +610,13 @@ export async function exportToVideo(
       }
 
       // Build transform style — identical to PreviewPanel
+      const elW = base.w * scale * scaleX;
+      const elH = base.h * scale * scaleY;
       const style: React.CSSProperties = base.w > 0
         ? {
             ...makeTransformStyle(x, y, scale, base.w, base.h, scaleX, scaleY, rotation, !!clip.flipX, !!clip.flipY),
             ...(animMask ? { overflow: 'hidden' as const } : {}),
-            ...(animMask ? { clipPath: buildClipPath(animMask) } : {}),
-            ...(animMask && animMask.feather > 0 ? { filter: `blur(${animMask.feather}px)` } : {}),
+            ...(animMask ? buildMaskStyle(animMask, elW, elH) : {}),
           }
         : { position: 'absolute' as const, opacity: 0, pointerEvents: 'none' as const };
 
@@ -676,6 +741,7 @@ export async function exportToVideo(
     const frame = new VideoFrame(canvas, {
       timestamp,
       duration: frameDuration * 1_000_000,
+      ...(transparentBg ? { alpha: 'keep' } : {}),
     });
 
     const keyFrame = frameIdx % (fps * 2) === 0; // keyframe every 2 seconds

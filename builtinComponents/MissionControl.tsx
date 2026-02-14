@@ -52,10 +52,15 @@ export function computeAnimT(
 }
 
 /**
- * macOS Mission Control–style layout.
+ * macOS Mission Control–style layout via AR-aware binary space partition.
  *
- * Each window's cell matches its CONTENT aspect ratio (measured from the
- * visible DOM). Falls back to canvas AR until measurement completes.
+ * Recursively bisects the canvas into regions proportional to each window's
+ * weight, then at each leaf fits the window into its region preserving its
+ * content AR. This produces tight, space-efficient packing with varied
+ * window sizes — not a uniform grid.
+ *
+ * Main window gets a larger weight so it occupies more area.
+ * `gap` controls spacing between windows.
  */
 export function computeGridPositions(
   slots: WindowSlot[],
@@ -74,111 +79,129 @@ export function computeGridPositions(
     const ar = ars[0];
     let w: number, h: number;
     if (ar > canvasAR) {
-      w = canvasW * 0.8;
+      w = canvasW * 0.92;
       h = w / ar;
     } else {
-      h = canvasH * 0.8;
+      h = canvasH * 0.92;
       w = h * ar;
     }
     return [{ x: (canvasW - w) / 2, y: (canvasH - h) / 2, w, h }];
   }
 
-  // Deterministic pseudo-random
-  function seededRandom(seed: number) {
-    let s = seed;
-    return () => {
-      s = (s * 1664525 + 1013904223) & 0x7fffffff;
-      return s / 0x7fffffff;
-    };
-  }
-  const rand = seededRandom(count * 7919 + 31);
-
-  // --- Grid estimation ---
-  const cols = Math.max(1, Math.round(Math.sqrt(count * canvasAR)));
-  const rows = Math.max(1, Math.ceil(count / cols));
-  const cellW = canvasW / cols;
-  const cellH = canvasH / rows;
-
-  // --- Cell assignment: main gets center cell ---
-  const mainIdx = slots.findIndex(s => s.isMain);
-  const centerCell = Math.floor(rows / 2) * cols + Math.floor(cols / 2);
-  const cellAssignment: number[] = new Array(count);
-  const usedCells = new Set<number>();
-
-  if (mainIdx >= 0 && centerCell < rows * cols) {
-    cellAssignment[mainIdx] = centerCell;
-    usedCells.add(centerCell);
-  }
-  let nextCell = 0;
-  for (let i = 0; i < count; i++) {
-    if (i === mainIdx) continue;
-    while (usedCells.has(nextCell)) nextCell++;
-    cellAssignment[i] = nextCell;
-    usedCells.add(nextCell);
-    nextCell++;
-  }
-
-  // --- Size each window using its own AR ---
   type R = { x: number; y: number; w: number; h: number };
-  const rects: R[] = [];
-  const mainCellScale = 0.92;
-  const secCellScale = 0.85;
 
+  // Main gets 2× weight so it's noticeably larger
+  const mainIdx = slots.findIndex(s => s.isMain);
+  const secondaryCount = mainIdx >= 0 ? count - 1 : count;
+  const mainWeight = 1.8 + secondaryCount * 0.15; // grows slightly with more windows
+
+  // Build weighted items sorted heaviest-first (main wins first split)
+  const items: { weight: number; slotIndex: number; ar: number }[] = [];
   for (let i = 0; i < count; i++) {
-    const cell = cellAssignment[i];
-    const col = cell % cols;
-    const row = Math.floor(cell / cols);
-    const isMain = slots[i].isMain;
-    const fillScale = isMain ? mainCellScale : secCellScale;
-    const ar = ars[i];
-
-    const availW = cellW - gap;
-    const availH = cellH - gap;
-    const s = Math.min(availW / ar, availH) * fillScale;
-    const w = s * ar;
-    const h = s;
-
-    const cx = col * cellW + (cellW - w) / 2 + (rand() - 0.5) * cellW * 0.06;
-    const cy = row * cellH + (cellH - h) / 2 + (rand() - 0.5) * cellH * 0.06;
-    rects.push({ x: cx, y: cy, w, h });
+    items.push({
+      weight: i === mainIdx ? mainWeight : 1,
+      slotIndex: i,
+      ar: ars[i],
+    });
   }
+  items.sort((a, b) => b.weight - a.weight);
 
-  for (const r of rects) {
-    r.x = clamp(r.x, 0, canvasW - r.w);
-    r.y = clamp(r.y, 0, canvasH - r.h);
-  }
+  const results: R[] = new Array(count);
+  const halfGap = gap / 2;
 
-  // --- AABB overlap repulsion ---
-  for (let iter = 0; iter < 20; iter++) {
-    let anyOverlap = false;
-    for (let i = 0; i < count; i++) {
-      for (let j = i + 1; j < count; j++) {
-        const a = rects[i];
-        const b = rects[j];
-        const overlapX = (a.w / 2 + b.w / 2 + gap) - Math.abs((a.x + a.w / 2) - (b.x + b.w / 2));
-        const overlapY = (a.h / 2 + b.h / 2 + gap) - Math.abs((a.y + a.h / 2) - (b.y + b.h / 2));
-        if (overlapX > 0 && overlapY > 0) {
-          anyOverlap = true;
-          if (overlapX < overlapY) {
-            const sign = (a.x + a.w / 2) < (b.x + b.w / 2) ? 1 : -1;
-            a.x -= sign * overlapX * 0.26;
-            b.x += sign * overlapX * 0.26;
-          } else {
-            const sign = (a.y + a.h / 2) < (b.y + b.h / 2) ? 1 : -1;
-            a.y -= sign * overlapY * 0.26;
-            b.y += sign * overlapY * 0.26;
-          }
-        }
+  /**
+   * Recursive BSP: split the rectangle into two halves weighted by total
+   * item weight, choosing the split axis that minimises AR mismatch.
+   */
+  function partition(
+    items: { weight: number; slotIndex: number; ar: number }[],
+    x: number, y: number, w: number, h: number,
+  ) {
+    if (items.length === 0) return;
+
+    if (items.length === 1) {
+      // Leaf: fit window AR inside region, centered
+      const item = items[0];
+      const regionW = Math.max(0, w - gap);
+      const regionH = Math.max(0, h - gap);
+      const ar = item.ar;
+
+      let fitW: number, fitH: number;
+      if (ar > regionW / regionH) {
+        fitW = regionW;
+        fitH = regionW / ar;
+      } else {
+        fitH = regionH;
+        fitW = regionH * ar;
+      }
+
+      results[item.slotIndex] = {
+        x: x + halfGap + (regionW - fitW) / 2,
+        y: y + halfGap + (regionH - fitH) / 2,
+        w: fitW,
+        h: fitH,
+      };
+      return;
+    }
+
+    // Find best split point (closest to 50% of total weight)
+    const totalWeight = items.reduce((s, it) => s + it.weight, 0);
+    let bestSplit = 1;
+    let bestDiff = Infinity;
+    let running = 0;
+    for (let i = 0; i < items.length - 1; i++) {
+      running += items[i].weight;
+      const diff = Math.abs(running / totalWeight - 0.5);
+      if (diff < bestDiff) {
+        bestDiff = diff;
+        bestSplit = i + 1;
       }
     }
-    for (const r of rects) {
-      r.x = clamp(r.x, 0, canvasW - r.w);
-      r.y = clamp(r.y, 0, canvasH - r.h);
+
+    const left = items.slice(0, bestSplit);
+    const right = items.slice(bestSplit);
+    const leftWeight = left.reduce((s, it) => s + it.weight, 0);
+    const ratio = leftWeight / totalWeight;
+
+    // Choose split axis: try both, pick the one that yields better
+    // aspect-ratio fit for the dominant item on each side
+    const leftAR = left[0].ar;
+    const rightAR = right[0].ar;
+
+    // Score a split: how well does each side's dominant AR fit its region?
+    function fitScore(
+      lw: number, lh: number, rw: number, rh: number,
+    ): number {
+      // Ratio of used area to region area (1.0 = perfect)
+      const lRegionAR = lw / lh;
+      const lFill = leftAR > lRegionAR
+        ? (lw * (lw / leftAR)) / (lw * lh)
+        : ((lh * leftAR) * lh) / (lw * lh);
+      const rRegionAR = rw / rh;
+      const rFill = rightAR > rRegionAR
+        ? (rw * (rw / rightAR)) / (rw * rh)
+        : ((rh * rightAR) * rh) / (rw * rh);
+      return lFill * leftWeight + rFill * (totalWeight - leftWeight);
     }
-    if (!anyOverlap) break;
+
+    const hScore = fitScore(w * ratio, h, w * (1 - ratio), h);
+    const vScore = fitScore(w, h * ratio, w, h * (1 - ratio));
+
+    if (hScore >= vScore) {
+      // Split horizontally (side by side)
+      const splitW = w * ratio;
+      partition(left, x, y, splitW, h);
+      partition(right, x + splitW, y, w - splitW, h);
+    } else {
+      // Split vertically (stacked)
+      const splitH = h * ratio;
+      partition(left, x, y, w, splitH);
+      partition(right, x, y + splitH, w, h - splitH);
+    }
   }
 
-  return rects;
+  partition(items, 0, 0, canvasW, canvasH);
+  return results;
 }
 
 /** Try to extract natural w/h from a DOM container's media children. */

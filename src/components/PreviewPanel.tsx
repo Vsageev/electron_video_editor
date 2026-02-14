@@ -61,7 +61,7 @@ function makeTransformStyle(
   };
 }
 
-function buildClipPath(mask: ClipMask): string {
+function buildClipPath(mask: ClipMask, elW?: number, elH?: number): string {
   const cx = mask.centerX * 100;
   const cy = mask.centerY * 100;
   const hw = (mask.width / 2) * 100;
@@ -77,8 +77,23 @@ function buildClipPath(mask: ClipMask): string {
   const right = 100 - (cx + hw);
   const bottom = 100 - (cy + hh);
   const left = cx - hw;
-  const r = mask.borderRadius * Math.min(hw, hh) * 2;
-  const rStr = r > 0 ? ` round ${r}%` : '';
+  // Compute aspect-ratio-corrected radius so corners are circular on non-square elements.
+  // CSS inset() round resolves % against element width (horizontal) and height (vertical),
+  // so we need separate values to get the same pixel radius in both directions.
+  let rStr = '';
+  if (mask.borderRadius > 0) {
+    if (elW && elH && elW > 0 && elH > 0) {
+      const hwPx = (mask.width / 2) * elW;
+      const hhPx = (mask.height / 2) * elH;
+      const rPx = mask.borderRadius * Math.min(hwPx, hhPx) * 2;
+      const rH = (rPx / elW) * 100;
+      const rV = (rPx / elH) * 100;
+      rStr = ` round ${rH}% / ${rV}%`;
+    } else {
+      const r = mask.borderRadius * Math.min(hw, hh) * 2;
+      rStr = ` round ${r}%`;
+    }
+  }
 
   if (!mask.invert) {
     return `inset(${top}% ${right}% ${bottom}% ${left}%${rStr})`;
@@ -88,6 +103,66 @@ function buildClipPath(mask: ClipMask): string {
   const rr = 100 - right;
   const bb = 100 - bottom;
   return `polygon(evenodd, 0% 0%, 100% 0%, 100% 100%, 0% 100%, 0% 0%, ${l}% ${t}%, ${rr}% ${t}%, ${rr}% ${bb}%, ${l}% ${bb}%, ${l}% ${t}%)`;
+}
+
+/**
+ * Build an SVG data-URI mask-image for feathered masks.
+ * Uses pixel-space coordinates (viewBox matches element size) so shapes and blur
+ * are aspect-ratio independent — no distortion on non-square elements.
+ */
+function buildFeatheredMaskStyle(mask: ClipMask, elW: number, elH: number): React.CSSProperties {
+  if (elW <= 0 || elH <= 0) return { clipPath: buildClipPath(mask, elW, elH) };
+
+  // All coordinates in pixels
+  const cx = mask.centerX * elW;
+  const cy = mask.centerY * elH;
+  const hw = (mask.width / 2) * elW;
+  const hh = (mask.height / 2) * elH;
+  const feather = mask.feather;
+  // Expand filter region beyond shape bounds to accommodate blur bleed
+  const pad = feather * 3;
+
+  let shapeEl: string;
+  if (mask.shape === 'ellipse') {
+    shapeEl = `<ellipse cx="${cx}" cy="${cy}" rx="${hw}" ry="${hh}" fill="white"/>`;
+  } else {
+    // borderRadius is 0–0.5 fraction of the smaller mask dimension (in pixels)
+    const r = mask.borderRadius * Math.min(hw, hh) * 2;
+    shapeEl = `<rect x="${cx - hw}" y="${cy - hh}" width="${hw * 2}" height="${hh * 2}" rx="${r}" ry="${r}" fill="white"/>`;
+  }
+
+  let maskContent: string;
+  if (mask.invert) {
+    maskContent = `<rect width="${elW}" height="${elH}" fill="white"/><g filter="url(%23feather)">${shapeEl.replace('fill="white"', 'fill="black"')}</g>`;
+  } else {
+    maskContent = `<g filter="url(%23feather)">${shapeEl}</g>`;
+  }
+
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${elW} ${elH}">`
+    + `<defs>`
+    + `<filter id="feather" x="${-pad}" y="${-pad}" width="${elW + pad * 2}" height="${elH + pad * 2}" filterUnits="userSpaceOnUse">`
+    + `<feGaussianBlur stdDeviation="${feather}"/>`
+    + `</filter>`
+    + `</defs>`
+    + `<mask id="m">${maskContent}</mask>`
+    + `<rect width="${elW}" height="${elH}" mask="url(%23m)" fill="white"/>`
+    + `</svg>`;
+
+  const encoded = `url("data:image/svg+xml,${svg}")`;
+  return {
+    WebkitMaskImage: encoded,
+    maskImage: encoded,
+    WebkitMaskSize: '100% 100%',
+    maskSize: '100% 100%',
+  } as React.CSSProperties;
+}
+
+/** Returns mask-related CSS props for a clip: clip-path for hard masks, SVG mask-image for feathered. */
+function buildMaskStyle(mask: ClipMask, elW: number, elH: number): React.CSSProperties {
+  if (mask.feather > 0) {
+    return buildFeatheredMaskStyle(mask, elW, elH);
+  }
+  return { clipPath: buildClipPath(mask, elW, elH) };
 }
 
 // ---------------------------------------------------------------------------
@@ -130,6 +205,7 @@ export default function PreviewPanel() {
   const setCanvasPan = useEditorStore((s) => s.setCanvasPan);
   const resetCanvasView = useEditorStore((s) => s.resetCanvasView);
   const exportSettings = useEditorStore((s) => s.exportSettings);
+  const maskEditActive = useEditorStore((s) => s.maskEditActive);
   const setExportSettings = useEditorStore((s) => s.setExportSettings);
 
   // ---- Aspect ratio ----
@@ -841,6 +917,8 @@ export default function PreviewPanel() {
 
   let handleStyle: React.CSSProperties | undefined;
   let selectedMask: ClipMask | null = null;
+  let handleBoxW = 0;
+  let handleBoxH = 0;
   if (showSingleHandles && selectedClip) {
     const base = getSelectedBase();
     if (base.w > 0) {
@@ -856,7 +934,11 @@ export default function PreviewPanel() {
         anim.scaleY,
         anim.rotation,
       );
-      selectedMask = getAnimatedMask(selectedClip, clipLocalTime);
+      handleBoxW = base.w * anim.scale * anim.scaleX;
+      handleBoxH = base.h * anim.scale * anim.scaleY;
+      if (maskEditActive) {
+        selectedMask = getAnimatedMask(selectedClip, clipLocalTime);
+      }
     }
   }
 
@@ -944,13 +1026,14 @@ export default function PreviewPanel() {
               ? fitSize(nat.w, nat.h, canvasSize.w, canvasSize.h)
               : { w: canvasSize.w, h: canvasSize.h };
 
+            const elW = base.w * scale * scaleX;
+            const elH = base.h * scale * scaleY;
             const style: React.CSSProperties =
               base.w > 0
                 ? {
                     ...makeTransformStyle(x, y, scale, base.w, base.h, scaleX, scaleY, rotation, !!clip.flipX, !!clip.flipY),
                     ...(animMask ? { overflow: 'hidden' } : {}),
-                    ...(animMask ? { clipPath: buildClipPath(animMask) } : {}),
-                    ...(animMask && animMask.feather > 0 ? { filter: `blur(${animMask.feather}px)` } : {}),
+                    ...(animMask ? buildMaskStyle(animMask, elW, elH) : {}),
                   }
                 : { position: 'absolute', opacity: 0, pointerEvents: 'none' };
 
@@ -1025,7 +1108,14 @@ export default function PreviewPanel() {
                   top: `${(selectedMask.centerY - selectedMask.height / 2) * 100}%`,
                   width: `${selectedMask.width * 100}%`,
                   height: `${selectedMask.height * 100}%`,
-                  borderRadius: selectedMask.shape === 'ellipse' ? '50%' : `${selectedMask.borderRadius * Math.min(selectedMask.width, selectedMask.height) * 100}%`,
+                  borderRadius: selectedMask.shape === 'ellipse' ? '50%' : (() => {
+                    const mwPx = selectedMask.width * handleBoxW;
+                    const mhPx = selectedMask.height * handleBoxH;
+                    const rPx = selectedMask.borderRadius * Math.min(mwPx, mhPx) * 2;
+                    const rH = mwPx > 0 ? (rPx / mwPx) * 100 : 0;
+                    const rV = mhPx > 0 ? (rPx / mhPx) * 100 : 0;
+                    return `${rH}% / ${rV}%`;
+                  })(),
                 }}
                 onMouseDown={handleMaskMoveDown}
               >

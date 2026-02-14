@@ -305,6 +305,7 @@ export default function App() {
         state.tracks,
         renderStart,
         renderEnd,
+        state.exportSettings.transparentBg,
       );
 
       if (!abort.signal.aborted) {
@@ -506,6 +507,18 @@ export default function App() {
                   <option key={q.bitrate} value={q.bitrate}>{q.label}</option>
                 ))}
               </select>
+            </div>
+
+            <div className="export-settings-row">
+              <label className="export-settings-label">Background</label>
+              <label className="export-checkbox-label">
+                <input
+                  type="checkbox"
+                  checked={exportSettings.transparentBg}
+                  onChange={(e) => setExportSettings({ transparentBg: e.target.checked })}
+                />
+                Transparent
+              </label>
             </div>
 
             <div className="export-settings-actions">

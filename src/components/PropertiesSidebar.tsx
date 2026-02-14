@@ -171,6 +171,8 @@ export default function PropertiesSidebar() {
   );
 
   const addAllKeyframes = useEditorStore((s) => s.addAllKeyframes);
+  const maskEditActive = useEditorStore((s) => s.maskEditActive);
+  const setMaskEditActive = useEditorStore((s) => s.setMaskEditActive);
 
   const handleAddAllKeyframes = useCallback(() => {
     if (!clip) return;
@@ -203,10 +205,11 @@ export default function PropertiesSidebar() {
         for (const p of MASK_ANIMATABLE_PROPS) delete newKfs[p];
       }
       updateClip(clip.id, { mask: undefined, keyframes: newKfs && Object.keys(newKfs).length > 0 ? newKfs : undefined });
+      setMaskEditActive(false);
     } else {
       updateClip(clip.id, { mask: clip.mask ? { ...clip.mask, shape } : defaultMask(shape) });
     }
-  }, [clip, updateClip]);
+  }, [clip, updateClip, setMaskEditActive]);
 
   const handleMaskInvert = useCallback((invert: boolean) => {
     if (!clip?.mask) return;
@@ -225,7 +228,8 @@ export default function PropertiesSidebar() {
       for (const p of MASK_ANIMATABLE_PROPS) delete newKfs[p];
     }
     updateClip(clip.id, { mask: undefined, keyframes: newKfs && Object.keys(newKfs).length > 0 ? newKfs : undefined });
-  }, [clip, updateClip]);
+    setMaskEditActive(false);
+  }, [clip, updateClip, setMaskEditActive]);
 
   // Collect all keyframes grouped by timestamp
   const keyframeGroups = useMemo(() => {
@@ -559,6 +563,15 @@ export default function PropertiesSidebar() {
                 <div className="property-group">
                   <div className="property-group-title">
                     Mask
+                    {clip.mask && clip.mask.shape !== 'none' && (
+                      <button
+                        className={`property-reset-btn${maskEditActive ? ' active' : ''}`}
+                        onClick={() => setMaskEditActive(!maskEditActive)}
+                        title="Edit mask on preview"
+                      >
+                        Edit
+                      </button>
+                    )}
                     {clip.mask && (
                       <button className="property-reset-btn" onClick={handleResetMask} title="Reset mask">
                         Reset

@@ -204,8 +204,8 @@ interface EditorState {
   setExportProgress: (v: number) => void;
   showExportSettings: boolean;
   setShowExportSettings: (v: boolean) => void;
-  exportSettings: { width: number; height: number; fps: number; bitrate: number };
-  setExportSettings: (s: Partial<{ width: number; height: number; fps: number; bitrate: number }>) => void;
+  exportSettings: { width: number; height: number; fps: number; bitrate: number; transparentBg: boolean };
+  setExportSettings: (s: Partial<{ width: number; height: number; fps: number; bitrate: number; transparentBg: boolean }>) => void;
 
   // Render range (in/out points)
   renderRangeStart: number | null;
@@ -226,6 +226,10 @@ interface EditorState {
   mediaMetadataLoading: boolean;
   loadMediaMetadata: (mediaPath: string) => Promise<void>;
   saveMediaMetadata: (mediaPath: string, content: string) => Promise<void>;
+
+  // Mask editing (preview overlay)
+  maskEditActive: boolean;
+  setMaskEditActive: (v: boolean) => void;
 
   // Settings
   showSettings: boolean;
@@ -576,17 +580,17 @@ export const useEditorStore = create<EditorState>((set, get) => {
     });
   },
   selectClip: (clipId, opts) => set((s) => {
-    if (clipId === null) return { selectedClipIds: [] };
+    if (clipId === null) return { selectedClipIds: [], maskEditActive: false };
     // Clear standalone media preview when selecting a timeline clip
     const clearPreview = s.previewMediaPath ? { previewMediaPath: null, previewMediaType: null } : {};
     if (opts?.toggle) {
       const idx = s.selectedClipIds.indexOf(clipId);
       if (idx >= 0) {
-        return { selectedClipIds: s.selectedClipIds.filter((id) => id !== clipId), ...clearPreview };
+        return { selectedClipIds: s.selectedClipIds.filter((id) => id !== clipId), maskEditActive: false, ...clearPreview };
       }
-      return { selectedClipIds: [...s.selectedClipIds, clipId], ...clearPreview };
+      return { selectedClipIds: [...s.selectedClipIds, clipId], maskEditActive: false, ...clearPreview };
     }
-    return { selectedClipIds: [clipId], ...clearPreview };
+    return { selectedClipIds: [clipId], maskEditActive: false, ...clearPreview };
   }),
 
   // Keyframes
@@ -692,7 +696,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
   setExportProgress: (v) => set({ exportProgress: v }),
   showExportSettings: false,
   setShowExportSettings: (v) => set({ showExportSettings: v }),
-  exportSettings: { width: 1920, height: 1080, fps: 30, bitrate: 8_000_000 },
+  exportSettings: { width: 1920, height: 1080, fps: 30, bitrate: 8_000_000, transparentBg: false },
   setExportSettings: (s) =>
     set((state) => ({ exportSettings: { ...state.exportSettings, ...s } })),
 
@@ -782,6 +786,10 @@ export const useEditorStore = create<EditorState>((set, get) => {
       }));
     }
   },
+
+  // Mask editing (preview overlay)
+  maskEditActive: false,
+  setMaskEditActive: (v) => set({ maskEditActive: v }),
 
   // Settings
   showSettings: false,
@@ -878,7 +886,7 @@ export const useEditorStore = create<EditorState>((set, get) => {
         tracks: data.tracks,
         trackIdCounter: data.trackIdCounter,
         clipIdCounter: data.clipIdCounter,
-        exportSettings: data.exportSettings,
+        exportSettings: { transparentBg: false, ...data.exportSettings },
         selectedClipIds: [],
         selectedMediaIndex: null,
         currentTime: 0,
